@@ -1,0 +1,22 @@
+format = 1
+
+[package]
+provenance = "built-in"
+id = "org.mochios.appstore"
+name = "App Store"
+version = "0.1.0"
+revision = 1
+vendor = "mochiOS"
+kind = "application"
+architecture = "x86_64"
+abi = "mochios-1"
+
+[[binary]]
+path = "/applications/AppStore.app/entry.elf"
+kind = "application"
+requires = [
+    "ipc.client",
+    "ipc.server",
+    "net.http.request",
+    "window.create",
+]

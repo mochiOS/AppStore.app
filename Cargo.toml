@@ -1,0 +1,26 @@
+[workspace]
+
+[package]
+name = "appstore"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+mochios-net-device-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-net-device-protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+viewkit = { path = "../../libraries/viewkit" }
+
+[target.'cfg(target_os = "mochios")'.dependencies]
+mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
+
+[[bin]]
+name = "appstore"
+path = "src/main.rs"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
