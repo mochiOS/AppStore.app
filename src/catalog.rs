@@ -1,5 +1,7 @@
 use serde::Deserialize;
 
+pub(crate) const PRODUCTION_API_BASE_URL: &str = "https://api.store.mochios.org/v1";
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct Storefront {
     #[serde(default)]

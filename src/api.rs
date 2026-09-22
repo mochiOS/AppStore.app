@@ -7,9 +7,8 @@ use mochios_net_device_protocol::{
     encode_http_close, encode_http_read, encode_http_request,
 };
 
-use crate::catalog::Storefront;
+use crate::catalog::{PRODUCTION_API_BASE_URL, Storefront};
 
-const PRODUCTION_API_BASE_URL: &str = "https://api.store.mochios.org/v1";
 const REQUEST_TIMEOUT_MS: u32 = 15_000;
 const MAX_HEADERS_BYTES: usize = 16 * 1024;
 const MAX_STOREFRONT_BYTES: usize = 4 * 1024 * 1024;
