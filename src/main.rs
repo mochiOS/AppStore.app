@@ -30,6 +30,7 @@ const MAX_ICON_DIMENSION: u32 = 2_048;
 const SELECTION_ALL: &str = "all";
 const SELECTION_UPDATES: &str = "library:updates";
 const SELECTION_INSTALLED: &str = "library:installed";
+const STOREFRONT_REQUEST_PREFIX: u64 = 0x5354_4f52_0000_0000;
 const RELEASE_REQUEST_PREFIX: u64 = 0x5245_4c53_0000_0000;
 const PACKAGE_REQUEST_PREFIX: u64 = 0x504b_4744_0000_0000;
 const REQUEST_KIND_MASK: u64 = 0xffff_ffff_0000_0000;
@@ -72,6 +73,12 @@ enum InstallStatus {
     Installing { bundle_id: String },
     Installed { bundle_id: String },
     Failed { bundle_id: String, message: String },
+}
+
+enum CatalogStatus {
+    Loading,
+    Ready(Storefront),
+    Failed(String),
 }
 
 fn next_request_id(prefix: u64) -> u64 {
@@ -326,7 +333,6 @@ impl View for AppTile {
             .style(ButtonStyle::Accent)
             .size(ButtonSize::Small)
             .radius(CornerRadius::Small)
-            .enabled(false)
             .accessibility_label(format!("Get {}", self.app.name))
             .paint(Self::button_bounds(bounds), context);
     }
@@ -879,7 +885,15 @@ fn library_content(selection: &str) -> VStack {
         .child(Text::body(message).tone(TextTone::Secondary))
 }
 
-fn error_content(error: &ApiError) -> VStack {
+fn loading_content() -> VStack {
+    VStack::new()
+        .alignment(StackAlignment::Stretch)
+        .gap(StackGap::Small)
+        .child(Text::styled("App Store", TextRole::TitleMedium).weight(600))
+        .child(Text::body("Loading applications…").tone(TextTone::Secondary))
+}
+
+fn error_content(error: &str) -> VStack {
     VStack::new()
         .alignment(StackAlignment::Stretch)
         .gap(StackGap::Small)
@@ -890,11 +904,11 @@ fn error_content(error: &ApiError) -> VStack {
             )
             .tone(TextTone::Secondary),
         )
-        .child(Text::metadata(error.to_string()))
+        .child(Text::metadata(error))
 }
 
 fn detail(
-    catalog: &Result<Storefront, ApiError>,
+    catalog: &CatalogStatus,
     search: State<String>,
     selection: State<String>,
     icons: State<Vec<LoadedIcon>>,
@@ -905,7 +919,7 @@ fn detail(
     install_status: State<InstallStatus>,
 ) -> VStack {
     let content = match catalog {
-        Ok(storefront) if selected_app.get().is_some() => {
+        CatalogStatus::Ready(storefront) if selected_app.get().is_some() => {
             let selected = selected_app.get().unwrap_or_default();
             match catalog_app(storefront, &selected) {
                 Some(app) => app_detail(
@@ -929,8 +943,10 @@ fn detail(
                 }
             }
         }
-        Ok(_) if selection.get().starts_with("library:") => library_content(&selection.get()),
-        Ok(storefront) => catalog_content(
+        CatalogStatus::Ready(_) if selection.get().starts_with("library:") => {
+            library_content(&selection.get())
+        }
+        CatalogStatus::Ready(storefront) => catalog_content(
             storefront,
             &search.get(),
             &selection.get(),
@@ -939,7 +955,8 @@ fn detail(
             release_status,
             pending_release,
         ),
-        Err(error) => error_content(error),
+        CatalogStatus::Loading => loading_content(),
+        CatalogStatus::Failed(error) => error_content(error),
     };
 
     let surface = Background::new()
@@ -971,14 +988,9 @@ fn decode_icon(bytes: &[u8]) -> Option<ImageData> {
     (image.width() <= MAX_ICON_DIMENSION && image.height() <= MAX_ICON_DIMENSION).then_some(image)
 }
 
-fn start_icon_requests(
-    catalog: &Result<Storefront, ApiError>,
-) -> (Vec<LoadedIcon>, Vec<(u64, String)>) {
+fn start_icon_requests(storefront: &Storefront) -> (Vec<LoadedIcon>, Vec<(u64, String)>) {
     let mut loaded = Vec::new();
     let mut pending = Vec::new();
-    let Ok(storefront) = catalog else {
-        return (loaded, pending);
-    };
     let mut seen = HashSet::new();
     let mut request_index = 1u64;
     for section in &storefront.sections {
@@ -1009,7 +1021,9 @@ fn start_icon_requests(
 }
 
 struct AppStoreApp {
-    catalog: Result<Storefront, ApiError>,
+    catalog: CatalogStatus,
+    catalog_revision: State<u64>,
+    pending_catalog: Option<u64>,
     search: State<String>,
     selection: State<String>,
     selected_app: State<Option<String>>,
@@ -1025,10 +1039,32 @@ impl App for AppStoreApp {
     type Body = StoreView;
 
     fn new() -> Self {
-        let catalog = api::fetch_storefront();
-        let (icons, pending_icons) = start_icon_requests(&catalog);
+        let request_id = next_request_id(STOREFRONT_REQUEST_PREFIX);
+        let (catalog, pending_catalog, icons, pending_icons) =
+            match api::start_storefront_request(request_id) {
+                Ok(DataRequest::Pending) => {
+                    (CatalogStatus::Loading, Some(request_id), Vec::new(), Vec::new())
+                }
+                Ok(DataRequest::Ready(storefront)) => {
+                    let (icons, pending_icons) = start_icon_requests(&storefront);
+                    (
+                        CatalogStatus::Ready(storefront),
+                        None,
+                        icons,
+                        pending_icons,
+                    )
+                }
+                Err(error) => (
+                    CatalogStatus::Failed(error.to_string()),
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            };
         Self {
             catalog,
+            catalog_revision: State::new(0),
+            pending_catalog,
             search: State::new(String::new()),
             selection: State::new(String::from(SELECTION_ALL)),
             selected_app: State::new(None),
@@ -1048,7 +1084,11 @@ impl App for AppStoreApp {
     }
 
     fn body(&self, _context: &ViewContext) -> Self::Body {
-        let storefront = self.catalog.as_ref().ok();
+        let _ = self.catalog_revision.get();
+        let storefront = match &self.catalog {
+            CatalogStatus::Ready(storefront) => Some(storefront),
+            CatalogStatus::Loading | CatalogStatus::Failed(_) => None,
+        };
         NavigationSplitView::new(
             navigation(
                 storefront,
@@ -1077,6 +1117,27 @@ impl App for AppStoreApp {
         let Some(request_id) = api::response_request_id(message) else {
             return false;
         };
+        if self.pending_catalog == Some(request_id) {
+            let Some((_, result)) = api::finish_storefront_request(message) else {
+                return false;
+            };
+            self.pending_catalog = None;
+            match result {
+                Ok(storefront) => {
+                    let (icons, pending_icons) = start_icon_requests(&storefront);
+                    self.catalog = CatalogStatus::Ready(storefront);
+                    self.icons.set(icons);
+                    self.pending_icons = pending_icons;
+                }
+                Err(error) => {
+                    self.catalog = CatalogStatus::Failed(error.to_string());
+                }
+            }
+            self.catalog_revision.update(|revision| {
+                *revision = revision.wrapping_add(1);
+            });
+            return true;
+        }
         if let Some(index) = self
             .pending_icons
             .iter()

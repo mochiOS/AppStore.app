@@ -26,7 +26,9 @@ impl fmt::Display for ApiError {
     }
 }
 
-pub(crate) fn fetch_storefront() -> Result<Storefront, ApiError> {
+pub(crate) fn start_storefront_request(
+    _request_id: u64,
+) -> Result<DataRequest<Storefront>, ApiError> {
     let base_url = std::env::var("APPSTORE_API_BASE_URL")
         .unwrap_or_else(|_| PRODUCTION_API_BASE_URL.to_string());
     let url = format!("{}/storefront", base_url.trim_end_matches('/'));
@@ -48,7 +50,15 @@ pub(crate) fn fetch_storefront() -> Result<Storefront, ApiError> {
             String::from_utf8_lossy(&output.stderr).trim().to_string(),
         ));
     }
-    serde_json::from_slice(&output.stdout).map_err(ApiError::InvalidJson)
+    serde_json::from_slice(&output.stdout)
+        .map(DataRequest::Ready)
+        .map_err(ApiError::InvalidJson)
+}
+
+pub(crate) fn finish_storefront_request(
+    _message: &[u8],
+) -> Option<(u64, Result<Storefront, ApiError>)> {
+    None
 }
 
 pub(crate) fn start_icon_request(
