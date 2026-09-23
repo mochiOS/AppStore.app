@@ -1018,6 +1018,7 @@ dependencies = [
  "mnu-abi",
  "mochi-user-syscall",
  "mochios-capability-protocol",
+ "mochios-workspace-protocol",
 ]
 
 [[package]]
@@ -1038,6 +1039,10 @@ source = "git+https://github.com/mochiOS/syscalls#0b494cb448832b1b5e3542eaa61c66
 
 [[package]]
 name = "mochios-viewkit-gpu-protocol"
+version = "0.1.0"
+
+[[package]]
+name = "mochios-workspace-protocol"
 version = "0.1.0"
 
 [[package]]
@@ -2357,6 +2362,7 @@ dependencies = [
  "bytemuck",
  "cosmic-text",
  "image",
+ "mochi-user-platform",
  "mochi-user-syscall",
  "mochios-viewkit-gpu-protocol",
  "pollster",
