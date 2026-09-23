@@ -16,15 +16,23 @@ const APP_ICON_RADIUS: f32 = 14.0;
 type StoreView = NavigationSplitView<Sidebar<VStack>, VStack>;
 
 fn navigation(storefront: Option<&Storefront>, search: State<String>) -> Sidebar<VStack> {
-    let mut browse = List::new().row(ListRow::new("All Apps").selected(true));
+    let mut browse = List::new().row(
+        ListRow::new("All Apps")
+            .icon(SymbolName::Grid)
+            .selected(true),
+    );
     if let Some(storefront) = storefront {
         for category in &storefront.categories {
-            browse = browse.row(ListRow::new(category.name.clone()));
+            browse = browse.row(ListRow::new(category.name.clone()).icon(SymbolName::Tag));
         }
     }
     let library = LIBRARY
         .iter()
-        .map(|label| ListRow::new(*label));
+        .map(|label| match *label {
+            "Updates" => ListRow::new(*label).icon(SymbolName::ArrowDownCircle),
+            "Installed" => ListRow::new(*label).icon(SymbolName::Internaldrive),
+            _ => ListRow::new(*label),
+        });
 
     Sidebar::new(
         VStack::new()
@@ -35,6 +43,7 @@ fn navigation(storefront: Option<&Storefront>, search: State<String>) -> Sidebar
                 TextField::new(search.binding())
                     .placeholder("Search apps")
                     .size(TextFieldSize::Small)
+                    .leading_symbol(SymbolName::Search)
                     .frame(Theme::current().layout.compact_form_control_width, Theme::current().layout.control_height),
             )
             .child(Text::metadata("Explore"))
@@ -154,20 +163,18 @@ fn section_view(section: &StorefrontSection, query: &str) -> VStack {
 fn catalog_content(storefront: &Storefront, query: &str) -> VStack {
     let mut content = VStack::new()
         .alignment(StackAlignment::Stretch)
-        .gap(StackGap::Large)
+        .gap(StackGap::DoubleExtraLarge)
         .child(
-            VStack::new()
-                .alignment(StackAlignment::Stretch)
-                .gap(StackGap::ExtraSmall)
-                .child(Text::styled(
-                    if query.trim().is_empty() { "Apps" } else { "Search Results" },
-                    TextRole::DisplayMedium,
-                ).weight(700))
-                .child(Text::body(if query.trim().is_empty() {
-                    "Apps available for mochiOS."
-                } else {
-                    "Apps matching your search."
-                }).tone(TextTone::Secondary)),
+            PageHeader::new(if query.trim().is_empty() {
+                "Apps"
+            } else {
+                "Search Results"
+            })
+            .subtitle(if query.trim().is_empty() {
+                "Apps available for mochiOS."
+            } else {
+                "Apps matching your search."
+            }),
         );
 
     let mut app_count = 0usize;
@@ -206,10 +213,10 @@ fn error_content(error: &ApiError) -> VStack {
     VStack::new()
         .alignment(StackAlignment::Stretch)
         .gap(StackGap::Small)
-        .child(Text::styled("App Store is unavailable", TextRole::TitleLarge))
         .child(
-            Text::body("The catalog could not be loaded. Check the network connection and reopen App Store.")
-                .tone(TextTone::Secondary),
+            PageHeader::new("App Store is unavailable").subtitle(
+                "The catalog could not be loaded. Check the network connection and reopen App Store.",
+            ),
         )
         .child(Text::metadata(error.to_string()))
 }
