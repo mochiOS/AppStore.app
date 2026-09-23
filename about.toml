@@ -4,3 +4,8 @@ version = "0.1.0"
 developer = "mochiOS"
 entry = "entry.elf"
 description = "Discover and install software for mochiOS"
+icon = "appicon.png"
+
+resources = [
+    "appicon.png",
+]

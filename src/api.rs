@@ -10,8 +10,15 @@ use mochios_net_device_protocol::{
 use crate::catalog::{PRODUCTION_API_BASE_URL, Storefront};
 
 const REQUEST_TIMEOUT_MS: u32 = 15_000;
+const ICON_REQUEST_TIMEOUT_MS: u32 = 5_000;
 const MAX_HEADERS_BYTES: usize = 16 * 1024;
 const MAX_STOREFRONT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_ICON_BYTES: usize = 2 * 1024 * 1024;
+
+pub(crate) enum IconRequest {
+    Pending,
+    Ready(Vec<u8>),
+}
 
 #[derive(Debug)]
 pub(crate) enum ApiError {
@@ -71,6 +78,74 @@ pub(crate) fn fetch_storefront() -> Result<Storefront, ApiError> {
     }
 
     serde_json::from_slice(&response.body).map_err(|_| ApiError::InvalidJson)
+}
+
+pub(crate) fn start_icon_request(request_id: u64, url: &str) -> Result<IconRequest, ApiError> {
+    if !url.starts_with("https://") {
+        return Err(ApiError::Protocol);
+    }
+    let service = network_service()?;
+    let mut request = vec![0; 48 + url.len()];
+    let request_length = encode_http_request(
+        request_id,
+        HttpMethod::Get,
+        ICON_REQUEST_TIMEOUT_MS,
+        url,
+        "",
+        "",
+        &[],
+        &mut request,
+    )
+    .map_err(|_| ApiError::Protocol)?;
+    mochi_user_platform::ipc::send(service, &request[..request_length])
+        .map_err(|error| ApiError::ServiceUnavailable(error.errno().unwrap_or(0)))?;
+    Ok(IconRequest::Pending)
+}
+
+pub(crate) fn finish_icon_request(message: &[u8]) -> Option<(u64, Result<Vec<u8>, ApiError>)> {
+    let result = decode_http_request_result(message).ok()?;
+    let request_id = result.request_id;
+    let completed = (|| {
+        if result.status != 0 || result.failure != HttpFailure::None {
+            return Err(ApiError::ServiceFailure {
+                status: result.status,
+                failure: result.failure,
+            });
+        }
+        if result.status_code != 200 {
+            let _ = close(request_id, result.handle);
+            return Err(ApiError::HttpStatus(result.status_code));
+        }
+        let content_type = result
+            .content_type
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim();
+        if !["image/png", "image/jpeg", "image/webp"]
+            .iter()
+            .any(|supported| content_type.eq_ignore_ascii_case(supported))
+        {
+            let _ = close(request_id, result.handle);
+            return Err(ApiError::InvalidContentType);
+        }
+        let body_length = result.body_length as usize;
+        let headers_length = result.headers_length as usize;
+        if body_length == 0 || body_length > MAX_ICON_BYTES || headers_length > MAX_HEADERS_BYTES {
+            let _ = close(request_id, result.handle);
+            return Err(ApiError::ResponseTooLarge);
+        }
+        let fetched = (|| {
+            read_stream(request_id, result.handle, HttpStream::Headers, headers_length)?;
+            read_stream(request_id, result.handle, HttpStream::Body, body_length)
+        })();
+        let closed = close(request_id, result.handle);
+        match (fetched, closed) {
+            (Ok(body), Ok(())) => Ok(body),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
+    })();
+    Some((request_id, completed))
 }
 
 struct Response {
@@ -203,13 +278,7 @@ fn close(request_id: u64, handle: u64) -> Result<(), ApiError> {
 }
 
 fn call(request: &[u8], reply: &mut [u8]) -> Result<usize, ApiError> {
-    let service = mochi_user_platform::process::find_by_name("network.service")
-        .map_err(|error| ApiError::ServiceUnavailable(error.errno().unwrap_or(0)))?;
-    if service == 0 {
-        return Err(ApiError::ServiceUnavailable(
-            mochi_user_platform::syscall::ENOENT,
-        ));
-    }
+    let service = network_service()?;
     let result = mochi_user_platform::ipc::call(service, request, reply)
         .map_err(|error| ApiError::ServiceUnavailable(error.errno().unwrap_or(0)))?;
     let length = (result & 0xffff_ffff) as usize;
@@ -217,5 +286,17 @@ fn call(request: &[u8], reply: &mut [u8]) -> Result<usize, ApiError> {
         Err(ApiError::Protocol)
     } else {
         Ok(length)
+    }
+}
+
+fn network_service() -> Result<u64, ApiError> {
+    let service = mochi_user_platform::process::find_by_name("network.service")
+        .map_err(|error| ApiError::ServiceUnavailable(error.errno().unwrap_or(0)))?;
+    if service == 0 {
+        Err(ApiError::ServiceUnavailable(
+            mochi_user_platform::syscall::ENOENT,
+        ))
+    } else {
+        Ok(service)
     }
 }

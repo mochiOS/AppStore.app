@@ -5,7 +5,7 @@ mod api;
 mod api;
 mod catalog;
 
-use api::ApiError;
+use api::{ApiError, IconRequest};
 use catalog::{CatalogApp, Storefront};
 use std::collections::HashSet;
 use std::sync::OnceLock;
@@ -19,6 +19,7 @@ const APP_TILE_HEIGHT: f32 = 158.0;
 const APP_ICON_SIZE: f32 = 96.0;
 const APP_BUTTON_WIDTH: f32 = 64.0;
 const APP_BUTTON_HEIGHT: f32 = 28.0;
+const MAX_ICON_DIMENSION: u32 = 2_048;
 const SELECTION_ALL: &str = "all";
 const SELECTION_UPDATES: &str = "library:updates";
 const SELECTION_INSTALLED: &str = "library:installed";
@@ -91,11 +92,18 @@ fn navigation(
 
 struct AppTile {
     app: CatalogApp,
+    icon: Option<ImageData>,
 }
 
 impl AppTile {
-    fn new(app: &CatalogApp) -> Self {
-        Self { app: app.clone() }
+    fn new(app: &CatalogApp, icons: &[LoadedIcon]) -> Self {
+        Self {
+            app: app.clone(),
+            icon: icons
+                .iter()
+                .find(|icon| icon.bundle_id == app.bundle_id)
+                .map(|icon| icon.image.clone()),
+        }
     }
 
     fn default_icon() -> Option<SvgData> {
@@ -135,7 +143,13 @@ impl View for AppTile {
     }
 
     fn paint(&self, bounds: Rect, context: &mut PaintContext<'_>) {
-        if let Some(icon) = Self::default_icon() {
+        if let Some(icon) = self.icon.clone() {
+            Image::new(icon)
+                .content_mode(ImageContentMode::Fill)
+                .radius(CornerRadius::Custom(APP_ICON_RADIUS))
+                .accessibility_label(format!("{} icon", self.app.name))
+                .paint(Self::icon_bounds(bounds), context);
+        } else if let Some(icon) = Self::default_icon() {
             Svg::new(icon)
                 .content_mode(SvgContentMode::Fill)
                 .radius(CornerRadius::Custom(APP_ICON_RADIUS))
@@ -196,7 +210,7 @@ fn grouped_apps<'a>(
     groups
 }
 
-fn section_view(title: String, apps: Vec<&CatalogApp>) -> VStack {
+fn section_view(title: String, apps: Vec<&CatalogApp>, icons: &[LoadedIcon]) -> VStack {
     VStack::new()
         .alignment(StackAlignment::Stretch)
         .gap(StackGap::DoubleExtraLarge)
@@ -208,19 +222,24 @@ fn section_view(title: String, apps: Vec<&CatalogApp>) -> VStack {
                         Theme::current().spacing.extra_large,
                         Theme::current().spacing.double_extra_large,
                     )
-                    .children(apps.into_iter().map(AppTile::new)),
+                    .children(apps.into_iter().map(|app| AppTile::new(app, icons))),
             ),
         )
 }
 
-fn catalog_content(storefront: &Storefront, query: &str, selection: &str) -> VStack {
+fn catalog_content(
+    storefront: &Storefront,
+    query: &str,
+    selection: &str,
+    icons: &[LoadedIcon],
+) -> VStack {
     let category = selection.strip_prefix("category:");
     let groups = grouped_apps(storefront, query, category);
     let mut content = VStack::new()
         .alignment(StackAlignment::Stretch)
         .gap(StackGap::TripleExtraLarge);
     for (title, apps) in groups.iter() {
-        content = content.child(section_view(title.clone(), apps.clone()));
+        content = content.child(section_view(title.clone(), apps.clone(), icons));
     }
 
     if groups.is_empty() {
@@ -276,10 +295,16 @@ fn detail(
     catalog: &Result<Storefront, ApiError>,
     search: State<String>,
     selection: State<String>,
+    icons: State<Vec<LoadedIcon>>,
 ) -> VStack {
     let content = match catalog {
         Ok(_) if selection.get().starts_with("library:") => library_content(&selection.get()),
-        Ok(storefront) => catalog_content(storefront, &search.get(), &selection.get()),
+        Ok(storefront) => catalog_content(
+            storefront,
+            &search.get(),
+            &selection.get(),
+            &icons.get(),
+        ),
         Err(error) => error_content(error),
     };
 
@@ -301,20 +326,74 @@ fn detail(
         .child(Scroll::vertical(surface).layout().flex_grow(1.0))
 }
 
+#[derive(Clone)]
+struct LoadedIcon {
+    bundle_id: String,
+    image: ImageData,
+}
+
+fn decode_icon(bytes: &[u8]) -> Option<ImageData> {
+    let image = ImageData::decode(bytes).ok()?;
+    (image.width() <= MAX_ICON_DIMENSION && image.height() <= MAX_ICON_DIMENSION).then_some(image)
+}
+
+fn start_icon_requests(
+    catalog: &Result<Storefront, ApiError>,
+) -> (Vec<LoadedIcon>, Vec<(u64, String)>) {
+    let mut loaded = Vec::new();
+    let mut pending = Vec::new();
+    let Ok(storefront) = catalog else {
+        return (loaded, pending);
+    };
+    let mut seen = HashSet::new();
+    let mut request_index = 1u64;
+    for section in &storefront.sections {
+        for app in &section.apps {
+            let Some(url) = app.icon.as_deref() else {
+                continue;
+            };
+            if !seen.insert(app.bundle_id.as_str()) {
+                continue;
+            }
+            let request_id = 0x4943_4f4e_0000_0000u64 | request_index;
+            request_index = request_index.saturating_add(1);
+            match api::start_icon_request(request_id, url) {
+                Ok(IconRequest::Pending) => pending.push((request_id, app.bundle_id.clone())),
+                Ok(IconRequest::Ready(bytes)) => {
+                    if let Some(image) = decode_icon(&bytes) {
+                        loaded.push(LoadedIcon {
+                            bundle_id: app.bundle_id.clone(),
+                            image,
+                        });
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+    }
+    (loaded, pending)
+}
+
 struct AppStoreApp {
     catalog: Result<Storefront, ApiError>,
     search: State<String>,
     selection: State<String>,
+    icons: State<Vec<LoadedIcon>>,
+    pending_icons: Vec<(u64, String)>,
 }
 
 impl App for AppStoreApp {
     type Body = StoreView;
 
     fn new() -> Self {
+        let catalog = api::fetch_storefront();
+        let (icons, pending_icons) = start_icon_requests(&catalog);
         Self {
-            catalog: api::fetch_storefront(),
+            catalog,
             search: State::new(String::new()),
             selection: State::new(String::from(SELECTION_ALL)),
+            icons: State::new(icons),
+            pending_icons,
         }
     }
 
@@ -337,8 +416,35 @@ impl App for AppStoreApp {
                 &self.catalog,
                 self.search.clone(),
                 self.selection.clone(),
+                self.icons.clone(),
             ),
         )
+    }
+
+    fn handle_platform_message(&mut self, message: &[u8]) -> bool {
+        let Some((request_id, result)) = api::finish_icon_request(message) else {
+            return false;
+        };
+        let Some(index) = self
+            .pending_icons
+            .iter()
+            .position(|(pending_id, _)| *pending_id == request_id)
+        else {
+            return false;
+        };
+        let (_, bundle_id) = self.pending_icons.swap_remove(index);
+        if let Ok(bytes) = result
+            && let Some(image) = decode_icon(&bytes)
+        {
+            self.icons.update(|icons| {
+                if let Some(icon) = icons.iter_mut().find(|icon| icon.bundle_id == bundle_id) {
+                    icon.image = image;
+                } else {
+                    icons.push(LoadedIcon { bundle_id, image });
+                }
+            });
+        }
+        true
     }
 }
 

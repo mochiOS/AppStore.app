@@ -3,6 +3,11 @@ use std::process::Command;
 
 use crate::catalog::{PRODUCTION_API_BASE_URL, Storefront};
 
+pub(crate) enum IconRequest {
+    Pending,
+    Ready(Vec<u8>),
+}
+
 #[derive(Debug)]
 pub(crate) enum ApiError {
     Request(String),
@@ -41,4 +46,33 @@ pub(crate) fn fetch_storefront() -> Result<Storefront, ApiError> {
         ));
     }
     serde_json::from_slice(&output.stdout).map_err(ApiError::InvalidJson)
+}
+
+pub(crate) fn start_icon_request(_request_id: u64, url: &str) -> Result<IconRequest, ApiError> {
+    if !url.starts_with("https://") {
+        return Err(ApiError::Request(String::from("icon URL must use HTTPS")));
+    }
+    let output = Command::new("curl")
+        .args([
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--max-time",
+            "5",
+            "--max-filesize",
+            "2097152",
+            url,
+        ])
+        .output()
+        .map_err(|error| ApiError::Request(error.to_string()))?;
+    if !output.status.success() {
+        return Err(ApiError::Request(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
+    }
+    Ok(IconRequest::Ready(output.stdout))
+}
+
+pub(crate) fn finish_icon_request(_message: &[u8]) -> Option<(u64, Result<Vec<u8>, ApiError>)> {
+    None
 }
