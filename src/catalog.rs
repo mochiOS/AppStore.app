@@ -24,7 +24,7 @@ pub(crate) struct StorefrontCategory {
     pub name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct CatalogApp {
     pub bundle_id: String,
     pub name: String,
@@ -34,4 +34,8 @@ pub(crate) struct CatalogApp {
     pub description: String,
     #[serde(default)]
     pub subtitle: Option<String>,
+    #[serde(default)]
+    pub category: String,
+    #[serde(default)]
+    pub icon: Option<String>,
 }

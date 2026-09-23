@@ -6,126 +6,129 @@ mod api;
 mod catalog;
 
 use api::ApiError;
-use catalog::{CatalogApp, Storefront, StorefrontSection};
+use catalog::{CatalogApp, Storefront};
+use std::collections::HashSet;
+use std::sync::OnceLock;
 use viewkit::prelude::*;
 use viewkit::view::{Constraints, MeasureContext, PaintContext};
 
 const LIBRARY: [&str; 2] = ["Updates", "Installed"];
 const APP_ICON_RADIUS: f32 = 14.0;
+const APP_TILE_WIDTH: f32 = 184.0;
+const APP_TILE_HEIGHT: f32 = 158.0;
+const APP_ICON_SIZE: f32 = 96.0;
+const APP_BUTTON_WIDTH: f32 = 64.0;
+const APP_BUTTON_HEIGHT: f32 = 28.0;
 
-type StoreView = NavigationSplitView<Sidebar<VStack>, VStack>;
+type StoreView = NavigationLayout;
 
-fn navigation(storefront: Option<&Storefront>, search: State<String>) -> Sidebar<VStack> {
-    let mut browse = List::new().row(
-        ListRow::new("All Apps")
-            .icon(SymbolName::Grid)
+fn navigation(storefront: Option<&Storefront>, search: State<String>) -> StackChild {
+    let mut browse = SidebarSection::new("Explore").item(
+        SidebarItem::new("All Apps")
+            .symbol(SymbolName::Grid)
             .selected(true),
     );
     if let Some(storefront) = storefront {
         for category in &storefront.categories {
-            browse = browse.row(ListRow::new(category.name.clone()).icon(SymbolName::Tag));
+            browse = browse
+                .item(SidebarItem::new(category.name.clone()).symbol(SymbolName::Tag));
         }
     }
-    let library = LIBRARY
-        .iter()
-        .map(|label| match *label {
-            "Updates" => ListRow::new(*label).icon(SymbolName::ArrowDownCircle),
-            "Installed" => ListRow::new(*label).icon(SymbolName::Internaldrive),
-            _ => ListRow::new(*label),
-        });
+    let mut library = SidebarSection::new("Library");
+    for label in LIBRARY {
+        let symbol = match label {
+            "Updates" => SymbolName::ArrowDownCircle,
+            "Installed" => SymbolName::Internaldrive,
+            _ => continue,
+        };
+        library = library.item(SidebarItem::new(label).symbol(symbol));
+    }
 
-    Sidebar::new(
-        VStack::new()
-            .alignment(StackAlignment::Stretch)
-            .gap(StackGap::Medium)
-            .child(Text::styled("App Store", TextRole::TitleSmall).weight(600))
-            .child(
-                TextField::new(search.binding())
-                    .placeholder("Search apps")
-                    .size(TextFieldSize::Small)
-                    .leading_symbol(SymbolName::Search)
-                    .frame(Theme::current().layout.compact_form_control_width, Theme::current().layout.control_height),
-            )
-            .child(Text::metadata("Explore"))
-            .child(browse)
-            .child(Text::metadata("Library"))
-            .child(List::new().rows(library))
-            .child(Spacer::new())
-            .child(Text::metadata("mochiOS")),
-    )
+    VStack::new()
+        .alignment(StackAlignment::Stretch)
+        .gap(StackGap::Large)
+        .child(
+            TextField::new(search.binding())
+                .placeholder("Search applications")
+                .size(TextFieldSize::Small)
+                .radius(CornerRadius::Custom(6.0))
+                .leading_symbol(SymbolName::Search)
+                .frame(
+                    Theme::current().layout.compact_form_control_width,
+                    Theme::current().layout.control_height,
+                ),
+        )
+        .child(browse)
+        .child(library)
+        .child(Spacer::new())
+        .into_stack_child()
 }
 
-struct AppIcon {
-    initial: String,
-    size: f32,
+struct AppTile {
+    app: CatalogApp,
 }
 
-impl View for AppIcon {
+impl AppTile {
+    fn new(app: &CatalogApp) -> Self {
+        Self { app: app.clone() }
+    }
+
+    fn default_icon() -> Option<SvgData> {
+        static ICON: OnceLock<Option<SvgData>> = OnceLock::new();
+        ICON.get_or_init(|| {
+            SvgData::decode(include_bytes!("../../binder/resources/appicon.svg")).ok()
+        })
+        .clone()
+    }
+
+    fn icon_bounds(bounds: Rect) -> Rect {
+        Rect::new(
+            bounds.origin.x + (bounds.size.width - APP_ICON_SIZE) * 0.5,
+            bounds.origin.y,
+            APP_ICON_SIZE,
+            APP_ICON_SIZE,
+        )
+    }
+
+    fn name_bounds(bounds: Rect) -> Rect {
+        Rect::new(bounds.origin.x, bounds.origin.y + 96.0, bounds.size.width, 25.0)
+    }
+
+    fn button_bounds(bounds: Rect) -> Rect {
+        Rect::new(
+            bounds.origin.x + (bounds.size.width - APP_BUTTON_WIDTH) * 0.5,
+            bounds.origin.y + 130.0,
+            APP_BUTTON_WIDTH,
+            APP_BUTTON_HEIGHT,
+        )
+    }
+}
+
+impl View for AppTile {
     fn measure(&self, constraints: Constraints, _context: &mut MeasureContext<'_>) -> Size {
-        constraints.constrain(Size::new(self.size, self.size))
+        constraints.constrain(Size::new(APP_TILE_WIDTH, APP_TILE_HEIGHT))
     }
 
     fn paint(&self, bounds: Rect, context: &mut PaintContext<'_>) {
-        Rectangle::new()
-            .color(RectangleColor::Accent)
-            .radius(CornerRadius::Custom(APP_ICON_RADIUS))
-            .paint(bounds, context);
-        Text::styled(self.initial.clone(), TextRole::TitleMedium)
-            .weight(700)
+        if let Some(icon) = Self::default_icon() {
+            Svg::new(icon)
+                .content_mode(SvgContentMode::Fill)
+                .radius(CornerRadius::Custom(APP_ICON_RADIUS))
+                .accessibility_label(format!("{} icon", self.app.name))
+                .paint(Self::icon_bounds(bounds), context);
+        }
+        Text::styled(self.app.name.clone(), TextRole::Label)
+            .weight(500)
             .alignment(TextAlignment::Center)
-            .color(Color::WHITE)
-            .paint(
-                Rect::new(
-                    bounds.origin.x,
-                    bounds.origin.y + bounds.size.height * 0.18,
-                    bounds.size.width,
-                    bounds.size.height * 0.7,
-                ),
-                context,
-            );
+            .paint(Self::name_bounds(bounds), context);
+        Button::new("Get")
+            .style(ButtonStyle::Accent)
+            .size(ButtonSize::Small)
+            .radius(CornerRadius::Small)
+            .enabled(false)
+            .accessibility_label(format!("Get {}", self.app.name))
+            .paint(Self::button_bounds(bounds), context);
     }
-}
-
-fn app_icon(app: &CatalogApp, size: f32) -> AppIcon {
-    AppIcon {
-        initial: app.name.chars().next().unwrap_or('A').to_string(),
-        size,
-    }
-}
-
-fn app_row(app: &CatalogApp) -> Padding<HStack> {
-    let description = app
-        .subtitle
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .unwrap_or(&app.description);
-    let subtitle = if description.is_empty() {
-        format!("{}  ·  {}", app.developer, app.bundle_id)
-    } else {
-        format!("{}  ·  {}", app.developer, description)
-    };
-
-    Padding::symmetric(8.0, 9.0).content(
-        HStack::new()
-            .alignment(StackAlignment::Center)
-            .gap(StackGap::Medium)
-            .child(app_icon(app, 48.0))
-            .child(
-                VStack::new()
-                    .alignment(StackAlignment::Stretch)
-                    .gap(StackGap::ExtraSmall)
-                    .child(Text::label(app.name.clone()).weight(600))
-                    .child(Text::caption(subtitle).tone(TextTone::Secondary))
-                    .layout()
-                    .flex_grow(1.0),
-            )
-            .child(
-                Button::new("Get")
-                    .style(ButtonStyle::Standard)
-                    .size(ButtonSize::Small)
-                    .enabled(false),
-            ),
-    )
 }
 
 fn app_matches_search(app: &CatalogApp, query: &str) -> bool {
@@ -138,73 +141,67 @@ fn app_matches_search(app: &CatalogApp, query: &str) -> bool {
         || app.bundle_id.to_ascii_lowercase().contains(&query)
 }
 
-fn section_view(section: &StorefrontSection, query: &str) -> VStack {
-    let mut heading = VStack::new()
-        .alignment(StackAlignment::Stretch)
-        .gap(StackGap::ExtraSmall)
-        .child(Text::styled(section.title.clone(), TextRole::TitleMedium));
-    if let Some(subtitle) = section
-        .subtitle
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        heading = heading.child(Text::body(subtitle).tone(TextTone::Secondary));
+fn grouped_apps<'a>(storefront: &'a Storefront, query: &str) -> Vec<(String, Vec<&'a CatalogApp>)> {
+    let mut groups: Vec<(String, Vec<&CatalogApp>)> = Vec::new();
+    let mut seen = HashSet::new();
+    for section in &storefront.sections {
+        for app in &section.apps {
+            if !app_matches_search(app, query) || !seen.insert(app.bundle_id.as_str()) {
+                continue;
+            }
+            let title = if app.category.trim().is_empty() {
+                section.title.clone()
+            } else {
+                app.category.clone()
+            };
+            if let Some((_, apps)) = groups.iter_mut().find(|(name, _)| name == &title) {
+                apps.push(app);
+            } else {
+                groups.push((title, vec![app]));
+            }
+        }
     }
+    groups
+}
 
+fn section_view(title: String, apps: Vec<&CatalogApp>) -> VStack {
     VStack::new()
         .alignment(StackAlignment::Stretch)
-        .gap(StackGap::Small)
-        .child(heading)
-        .child(List::new().rows(
-            section.apps.iter().filter(|app| app_matches_search(app, query)).map(app_row),
-        ))
+        .gap(StackGap::DoubleExtraLarge)
+        .child(Text::styled(title, TextRole::TitleMedium).weight(600))
+        .child(
+            Padding::only(0.0, 0.0, 0.0, Theme::current().spacing.large).content(
+                AdaptiveGrid::new(APP_TILE_WIDTH, APP_TILE_HEIGHT)
+                    .spacing(
+                        Theme::current().spacing.extra_large,
+                        Theme::current().spacing.double_extra_large,
+                    )
+                    .children(apps.into_iter().map(AppTile::new)),
+            ),
+        )
 }
 
 fn catalog_content(storefront: &Storefront, query: &str) -> VStack {
+    let groups = grouped_apps(storefront, query);
     let mut content = VStack::new()
         .alignment(StackAlignment::Stretch)
-        .gap(StackGap::DoubleExtraLarge)
-        .child(
-            PageHeader::new(if query.trim().is_empty() {
-                "Apps"
-            } else {
-                "Search Results"
-            })
-            .subtitle(if query.trim().is_empty() {
-                "Apps available for mochiOS."
-            } else {
-                "Apps matching your search."
-            }),
-        );
-
-    let mut app_count = 0usize;
-    for section in &storefront.sections {
-        if section.apps.is_empty() {
-            continue;
-        }
-        let matches = section.apps.iter().filter(|app| app_matches_search(app, query)).count();
-        if matches == 0 {
-            continue;
-        }
-        app_count += matches;
-        content = content.child(section_view(section, query));
+        .gap(StackGap::TripleExtraLarge);
+    for (title, apps) in groups.iter() {
+        content = content.child(section_view(title.clone(), apps.clone()));
     }
 
-    if app_count == 0 {
-        content = content
-            .child(Text::styled(if query.trim().is_empty() {
-                "No apps are currently available"
-            } else {
-                "No matching apps"
-            }, TextRole::TitleMedium))
-            .child(
-                Text::body(if query.trim().is_empty() {
-                    "Published apps will appear here when they become available."
+    if groups.is_empty() {
+        content = content.child(
+            Text::styled(
+                if query.trim().is_empty() {
+                    "No apps are currently available"
                 } else {
-                    "Try a different name or developer."
-                })
-                    .tone(TextTone::Secondary),
-            );
+                    "No matching apps"
+                },
+                TextRole::TitleMedium,
+            )
+            .weight(600),
+        );
     }
     content
 }
@@ -213,10 +210,12 @@ fn error_content(error: &ApiError) -> VStack {
     VStack::new()
         .alignment(StackAlignment::Stretch)
         .gap(StackGap::Small)
+        .child(Text::styled("App Store is unavailable", TextRole::TitleMedium).weight(600))
         .child(
-            PageHeader::new("App Store is unavailable").subtitle(
+            Text::body(
                 "The catalog could not be loaded. Check the network connection and reopen App Store.",
-            ),
+            )
+            .tone(TextTone::Secondary),
         )
         .child(Text::metadata(error.to_string()))
 }
@@ -227,14 +226,22 @@ fn detail(catalog: &Result<Storefront, ApiError>, search: State<String>) -> VSta
         Err(error) => error_content(error),
     };
 
+    let surface = Background::new()
+        .background(Rectangle::new().color(RectangleColor::Surface))
+        .content(
+            Padding::only(
+                Theme::current().spacing.medium,
+                Theme::current().spacing.medium,
+                Theme::current().spacing.extra_large,
+                Theme::current().spacing.medium,
+            )
+            .content(content),
+        );
+
     VStack::new()
         .alignment(StackAlignment::Stretch)
         .gap(StackGap::None)
-        .child(
-            Scroll::vertical(ContentArea::new(content))
-                .layout()
-                .flex_grow(1.0),
-        )
+        .child(Scroll::vertical(surface).layout().flex_grow(1.0))
 }
 
 struct AppStoreApp {
@@ -254,13 +261,14 @@ impl App for AppStoreApp {
 
     fn window(&self) -> WindowOptions {
         WindowOptions::new("App Store")
-            .size(920.0, 640.0)
+            .size(1040.0, 700.0)
             .resizable(true)
     }
 
     fn body(&self, _context: &ViewContext) -> Self::Body {
         let storefront = self.catalog.as_ref().ok();
-        NavigationSplitView::new(
+        NavigationLayout::new(
+            HStack::new().child(Spacer::new()),
             navigation(storefront, self.search.clone()),
             detail(&self.catalog, self.search.clone()),
         )
@@ -273,7 +281,7 @@ fn main() -> Result<(), ViewKitError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CatalogApp, app_matches_search};
+    use super::{CatalogApp, Storefront, app_matches_search, grouped_apps};
 
     #[test]
     fn catalog_search_matches_visible_app_details() {
@@ -284,10 +292,51 @@ mod tests {
             developer: String::from("mochiOS"),
             description: String::from("Write ideas"),
             subtitle: Some(String::from("Quick capture")),
+            category: String::from("Productivity"),
+            icon: None,
         };
         assert!(app_matches_search(&app, "notes"));
         assert!(app_matches_search(&app, "QUICK"));
         assert!(app_matches_search(&app, "write"));
         assert!(!app_matches_search(&app, "calendar"));
+    }
+
+    #[test]
+    fn catalog_uses_api_category_and_deduplicates_apps() {
+        let storefront: Storefront = serde_json::from_str(
+            r#"{
+                "categories": [{"name":"Development","slug":"development"}],
+                "sections": [
+                    {"title":"Apps","apps":[{
+                        "bundle_id":"com.example.testapp",
+                        "name":"TestApp",
+                        "version":"0.1.0",
+                        "developer":"tas0dev",
+                        "description":"Test Application for mochiOS",
+                        "category":"Development",
+                        "icon":"https://github.com/mochiOS.png"
+                    }]},
+                    {"title":"Featured","apps":[{
+                        "bundle_id":"com.example.testapp",
+                        "name":"TestApp",
+                        "version":"0.1.0",
+                        "developer":"tas0dev",
+                        "description":"Test Application for mochiOS",
+                        "category":"Development"
+                    }]}
+                ]
+            }"#,
+        )
+        .expect("storefront fixture");
+
+        let groups = grouped_apps(&storefront, "");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, "Development");
+        assert_eq!(groups[0].1.len(), 1);
+        assert_eq!(groups[0].1[0].name, "TestApp");
+        assert_eq!(
+            groups[0].1[0].icon.as_deref(),
+            Some("https://github.com/mochiOS.png")
+        );
     }
 }
