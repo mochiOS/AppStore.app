@@ -16,7 +16,13 @@ AppStore server -> catalog client -> catalog model -> ViewKit UI
 - Server: <https://github.com/mochiOS/AppStore>
 - Native client: <https://github.com/mochiOS/AppStore.app>
 
-Package downloads and installation are not connected yet. The Get control is
-disabled until the client can verify a compatible release and hand its MPKG to
-`package.service`. The storefront API can list releases whose architecture and
-ABI are unknown; those must not be treated as installable.
+Selecting a catalog tile opens its detail view. The client then requests the
+latest `x86_64` / `mochios-1` release, downloads the MPKG through the public
+download endpoint in bounded ranges, verifies the advertised size and SHA-256,
+and hands the temporary file to `package.service`. The service remains the
+authority for Developer Certificate, manifest, payload, and capability
+verification. Temporary packages are removed after success or failure.
+
+The storefront can still contain legacy releases whose architecture and ABI
+are unknown. They remain visible but are deliberately not installable; there is
+no AdHoc or unfiltered download fallback.

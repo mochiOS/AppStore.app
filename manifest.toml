@@ -15,8 +15,10 @@ abi = "mochios-1"
 path = "/applications/AppStore.app/entry.elf"
 kind = "application"
 requires = [
+    "fs.write.tmp",
     "ipc.client",
     "ipc.server",
     "net.http.request",
+    "package.install",
     "window.create",
 ]

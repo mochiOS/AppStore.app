@@ -10,6 +10,7 @@ publish = false
 mochios-net-device-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-net-device-protocol" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 viewkit = { path = "../../libraries/viewkit" }
 
 [target.'cfg(target_os = "mochios")'.dependencies]

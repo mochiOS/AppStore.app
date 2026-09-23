@@ -7,17 +7,21 @@ use mochios_net_device_protocol::{
     encode_http_close, encode_http_read, encode_http_request,
 };
 
-use crate::catalog::{PRODUCTION_API_BASE_URL, Storefront};
+use crate::catalog::{PRODUCTION_API_BASE_URL, ReleaseResponse, Storefront};
 
 const REQUEST_TIMEOUT_MS: u32 = 15_000;
 const ICON_REQUEST_TIMEOUT_MS: u32 = 5_000;
+const PACKAGE_REQUEST_TIMEOUT_MS: u32 = 120_000;
 const MAX_HEADERS_BYTES: usize = 16 * 1024;
 const MAX_STOREFRONT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_ICON_BYTES: usize = 2 * 1024 * 1024;
+const MAX_RELEASE_RESPONSE_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_PACKAGE_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const MAX_PACKAGE_CHUNK_BYTES: usize = 2 * 1024 * 1024;
 
-pub(crate) enum IconRequest {
+pub(crate) enum DataRequest<T> {
     Pending,
-    Ready(Vec<u8>),
+    Ready(T),
 }
 
 #[derive(Debug)]
@@ -80,18 +84,65 @@ pub(crate) fn fetch_storefront() -> Result<Storefront, ApiError> {
     serde_json::from_slice(&response.body).map_err(|_| ApiError::InvalidJson)
 }
 
-pub(crate) fn start_icon_request(request_id: u64, url: &str) -> Result<IconRequest, ApiError> {
+pub(crate) fn start_icon_request(
+    request_id: u64,
+    url: &str,
+) -> Result<DataRequest<Vec<u8>>, ApiError> {
     if !url.starts_with("https://") {
         return Err(ApiError::Protocol);
     }
+    start_async_get(request_id, url, ICON_REQUEST_TIMEOUT_MS, "")
+}
+
+pub(crate) fn start_release_request(
+    request_id: u64,
+    bundle_id: &str,
+) -> Result<DataRequest<ReleaseResponse>, ApiError> {
+    let base_url = option_env!("APPSTORE_API_BASE_URL").unwrap_or(PRODUCTION_API_BASE_URL);
+    let url = format!(
+        "{}/apps/{}/releases?architecture=x86_64&abi=mochios-1",
+        base_url.trim_end_matches('/'),
+        encode_component(bundle_id),
+    );
+    start_async_get(request_id, &url, REQUEST_TIMEOUT_MS, "").map(|_| DataRequest::Pending)
+}
+
+pub(crate) fn start_package_request(
+    request_id: u64,
+    bundle_id: &str,
+    version: &str,
+    offset: usize,
+    length: usize,
+) -> Result<DataRequest<Vec<u8>>, ApiError> {
+    let base_url = option_env!("APPSTORE_API_BASE_URL").unwrap_or(PRODUCTION_API_BASE_URL);
+    let url = format!(
+        "{}/apps/{}/download?version={}&architecture=x86_64&abi=mochios-1",
+        base_url.trim_end_matches('/'),
+        encode_component(bundle_id),
+        encode_component(version),
+    );
+    let end = offset
+        .checked_add(length)
+        .and_then(|value| value.checked_sub(1))
+        .ok_or(ApiError::Protocol)?;
+    let range = format!("bytes={offset}-{end}");
+    start_async_get(request_id, &url, PACKAGE_REQUEST_TIMEOUT_MS, &range)
+}
+
+fn start_async_get(
+    request_id: u64,
+    url: &str,
+    timeout_ms: u32,
+    range: &str,
+) -> Result<DataRequest<Vec<u8>>, ApiError> {
     let service = network_service()?;
     let mut request = vec![0; 48 + url.len()];
     let request_length = encode_http_request(
         request_id,
         HttpMethod::Get,
-        ICON_REQUEST_TIMEOUT_MS,
+        timeout_ms,
         url,
-        "",
+        range,
         "",
         &[],
         &mut request,
@@ -99,10 +150,62 @@ pub(crate) fn start_icon_request(request_id: u64, url: &str) -> Result<IconReque
     .map_err(|_| ApiError::Protocol)?;
     mochi_user_platform::ipc::send(service, &request[..request_length])
         .map_err(|error| ApiError::ServiceUnavailable(error.errno().unwrap_or(0)))?;
-    Ok(IconRequest::Pending)
+    Ok(DataRequest::Pending)
 }
 
 pub(crate) fn finish_icon_request(message: &[u8]) -> Option<(u64, Result<Vec<u8>, ApiError>)> {
+    finish_request(message, MAX_ICON_BYTES, |content_type| {
+        ["image/png", "image/jpeg", "image/webp"]
+            .iter()
+            .any(|supported| content_type.eq_ignore_ascii_case(supported))
+    }, |status| status == 200)
+}
+
+pub(crate) fn finish_release_request(
+    message: &[u8],
+) -> Option<(u64, Result<ReleaseResponse, ApiError>)> {
+    finish_request(
+        message,
+        MAX_RELEASE_RESPONSE_BYTES,
+        |content_type| content_type.eq_ignore_ascii_case("application/json"),
+        |status| status == 200,
+    )
+    .map(|(request_id, result)| {
+        (
+            request_id,
+            result.and_then(|bytes| {
+                serde_json::from_slice(&bytes).map_err(|_| ApiError::InvalidJson)
+            }),
+        )
+    })
+}
+
+pub(crate) fn finish_package_request(
+    message: &[u8],
+) -> Option<(u64, Result<Vec<u8>, ApiError>)> {
+    finish_request(
+        message,
+        MAX_PACKAGE_CHUNK_BYTES,
+        |content_type| {
+            content_type.eq_ignore_ascii_case("application/octet-stream")
+                || content_type.eq_ignore_ascii_case("application/x-mpkg")
+        },
+        |status| matches!(status, 200 | 206),
+    )
+}
+
+pub(crate) fn response_request_id(message: &[u8]) -> Option<u64> {
+    decode_http_request_result(message)
+        .ok()
+        .map(|result| result.request_id)
+}
+
+fn finish_request(
+    message: &[u8],
+    maximum_body_bytes: usize,
+    valid_content_type: impl FnOnce(&str) -> bool,
+    valid_status: impl FnOnce(u16) -> bool,
+) -> Option<(u64, Result<Vec<u8>, ApiError>)> {
     let result = decode_http_request_result(message).ok()?;
     let request_id = result.request_id;
     let completed = (|| {
@@ -112,7 +215,7 @@ pub(crate) fn finish_icon_request(message: &[u8]) -> Option<(u64, Result<Vec<u8>
                 failure: result.failure,
             });
         }
-        if result.status_code != 200 {
+        if !valid_status(result.status_code) {
             let _ = close(request_id, result.handle);
             return Err(ApiError::HttpStatus(result.status_code));
         }
@@ -122,16 +225,16 @@ pub(crate) fn finish_icon_request(message: &[u8]) -> Option<(u64, Result<Vec<u8>
             .next()
             .unwrap_or("")
             .trim();
-        if !["image/png", "image/jpeg", "image/webp"]
-            .iter()
-            .any(|supported| content_type.eq_ignore_ascii_case(supported))
-        {
+        if !valid_content_type(content_type) {
             let _ = close(request_id, result.handle);
             return Err(ApiError::InvalidContentType);
         }
         let body_length = result.body_length as usize;
         let headers_length = result.headers_length as usize;
-        if body_length == 0 || body_length > MAX_ICON_BYTES || headers_length > MAX_HEADERS_BYTES {
+        if body_length == 0
+            || body_length > maximum_body_bytes
+            || headers_length > MAX_HEADERS_BYTES
+        {
             let _ = close(request_id, result.handle);
             return Err(ApiError::ResponseTooLarge);
         }
@@ -146,6 +249,19 @@ pub(crate) fn finish_icon_request(message: &[u8]) -> Option<(u64, Result<Vec<u8>
         }
     })();
     Some((request_id, completed))
+}
+
+fn encode_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            use core::fmt::Write;
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
 }
 
 struct Response {

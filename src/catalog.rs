@@ -39,3 +39,21 @@ pub(crate) struct CatalogApp {
     #[serde(default)]
     pub icon: Option<String>,
 }
+
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct CatalogRelease {
+    pub release_id: String,
+    pub bundle_id: String,
+    pub version: String,
+    pub size: i64,
+    pub sha256: String,
+    pub architecture: Option<String>,
+    pub abi: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ReleaseResponse {
+    pub bundle_id: String,
+    #[serde(default)]
+    pub releases: Vec<CatalogRelease>,
+}
