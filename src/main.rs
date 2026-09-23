@@ -19,29 +19,54 @@ const APP_TILE_HEIGHT: f32 = 158.0;
 const APP_ICON_SIZE: f32 = 96.0;
 const APP_BUTTON_WIDTH: f32 = 64.0;
 const APP_BUTTON_HEIGHT: f32 = 28.0;
+const SELECTION_ALL: &str = "all";
+const SELECTION_UPDATES: &str = "library:updates";
+const SELECTION_INSTALLED: &str = "library:installed";
 
 type StoreView = NavigationLayout;
 
-fn navigation(storefront: Option<&Storefront>, search: State<String>) -> StackChild {
+fn category_selection(name: &str) -> String {
+    format!("category:{name}")
+}
+
+fn navigation(
+    storefront: Option<&Storefront>,
+    search: State<String>,
+    selection: State<String>,
+) -> StackChild {
+    let all_selection = selection.clone();
     let mut browse = SidebarSection::new("Explore").item(
         SidebarItem::new("All Apps")
             .symbol(SymbolName::Grid)
-            .selected(true),
+            .selected(selection.get() == SELECTION_ALL)
+            .on_select(move || all_selection.set(String::from(SELECTION_ALL))),
     );
     if let Some(storefront) = storefront {
         for category in &storefront.categories {
-            browse = browse
-                .item(SidebarItem::new(category.name.clone()).symbol(SymbolName::Tag));
+            let target = category_selection(&category.name);
+            let category_selection = selection.clone();
+            browse = browse.item(
+                SidebarItem::new(category.name.clone())
+                    .symbol(SymbolName::Tag)
+                    .selected(selection.get() == target)
+                    .on_select(move || category_selection.set(target.clone())),
+            );
         }
     }
     let mut library = SidebarSection::new("Library");
     for label in LIBRARY {
-        let symbol = match label {
-            "Updates" => SymbolName::ArrowDownCircle,
-            "Installed" => SymbolName::Internaldrive,
+        let (symbol, target) = match label {
+            "Updates" => (SymbolName::ArrowDownCircle, SELECTION_UPDATES),
+            "Installed" => (SymbolName::Internaldrive, SELECTION_INSTALLED),
             _ => continue,
         };
-        library = library.item(SidebarItem::new(label).symbol(symbol));
+        let library_selection = selection.clone();
+        library = library.item(
+            SidebarItem::new(label)
+                .symbol(symbol)
+                .selected(selection.get() == target)
+                .on_select(move || library_selection.set(String::from(target))),
+        );
     }
 
     VStack::new()
@@ -141,12 +166,19 @@ fn app_matches_search(app: &CatalogApp, query: &str) -> bool {
         || app.bundle_id.to_ascii_lowercase().contains(&query)
 }
 
-fn grouped_apps<'a>(storefront: &'a Storefront, query: &str) -> Vec<(String, Vec<&'a CatalogApp>)> {
+fn grouped_apps<'a>(
+    storefront: &'a Storefront,
+    query: &str,
+    category: Option<&str>,
+) -> Vec<(String, Vec<&'a CatalogApp>)> {
     let mut groups: Vec<(String, Vec<&CatalogApp>)> = Vec::new();
     let mut seen = HashSet::new();
     for section in &storefront.sections {
         for app in &section.apps {
-            if !app_matches_search(app, query) || !seen.insert(app.bundle_id.as_str()) {
+            if category.is_some_and(|category| app.category != category)
+                || !app_matches_search(app, query)
+                || !seen.insert(app.bundle_id.as_str())
+            {
                 continue;
             }
             let title = if app.category.trim().is_empty() {
@@ -181,8 +213,9 @@ fn section_view(title: String, apps: Vec<&CatalogApp>) -> VStack {
         )
 }
 
-fn catalog_content(storefront: &Storefront, query: &str) -> VStack {
-    let groups = grouped_apps(storefront, query);
+fn catalog_content(storefront: &Storefront, query: &str, selection: &str) -> VStack {
+    let category = selection.strip_prefix("category:");
+    let groups = grouped_apps(storefront, query, category);
     let mut content = VStack::new()
         .alignment(StackAlignment::Stretch)
         .gap(StackGap::TripleExtraLarge);
@@ -206,6 +239,25 @@ fn catalog_content(storefront: &Storefront, query: &str) -> VStack {
     content
 }
 
+fn library_content(selection: &str) -> VStack {
+    let (title, message) = if selection == SELECTION_UPDATES {
+        (
+            "Updates",
+            "Application updates will appear here when package installation is available.",
+        )
+    } else {
+        (
+            "Installed",
+            "Installed applications will appear here when package installation is available.",
+        )
+    };
+    VStack::new()
+        .alignment(StackAlignment::Stretch)
+        .gap(StackGap::Small)
+        .child(Text::styled(title, TextRole::TitleMedium).weight(600))
+        .child(Text::body(message).tone(TextTone::Secondary))
+}
+
 fn error_content(error: &ApiError) -> VStack {
     VStack::new()
         .alignment(StackAlignment::Stretch)
@@ -220,9 +272,14 @@ fn error_content(error: &ApiError) -> VStack {
         .child(Text::metadata(error.to_string()))
 }
 
-fn detail(catalog: &Result<Storefront, ApiError>, search: State<String>) -> VStack {
+fn detail(
+    catalog: &Result<Storefront, ApiError>,
+    search: State<String>,
+    selection: State<String>,
+) -> VStack {
     let content = match catalog {
-        Ok(storefront) => catalog_content(storefront, &search.get()),
+        Ok(_) if selection.get().starts_with("library:") => library_content(&selection.get()),
+        Ok(storefront) => catalog_content(storefront, &search.get(), &selection.get()),
         Err(error) => error_content(error),
     };
 
@@ -247,6 +304,7 @@ fn detail(catalog: &Result<Storefront, ApiError>, search: State<String>) -> VSta
 struct AppStoreApp {
     catalog: Result<Storefront, ApiError>,
     search: State<String>,
+    selection: State<String>,
 }
 
 impl App for AppStoreApp {
@@ -256,6 +314,7 @@ impl App for AppStoreApp {
         Self {
             catalog: api::fetch_storefront(),
             search: State::new(String::new()),
+            selection: State::new(String::from(SELECTION_ALL)),
         }
     }
 
@@ -269,8 +328,16 @@ impl App for AppStoreApp {
         let storefront = self.catalog.as_ref().ok();
         NavigationLayout::new(
             HStack::new().child(Spacer::new()),
-            navigation(storefront, self.search.clone()),
-            detail(&self.catalog, self.search.clone()),
+            navigation(
+                storefront,
+                self.search.clone(),
+                self.selection.clone(),
+            ),
+            detail(
+                &self.catalog,
+                self.search.clone(),
+                self.selection.clone(),
+            ),
         )
     }
 }
@@ -329,7 +396,7 @@ mod tests {
         )
         .expect("storefront fixture");
 
-        let groups = grouped_apps(&storefront, "");
+        let groups = grouped_apps(&storefront, "", None);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].0, "Development");
         assert_eq!(groups[0].1.len(), 1);
@@ -338,5 +405,10 @@ mod tests {
             groups[0].1[0].icon.as_deref(),
             Some("https://github.com/mochiOS.png")
         );
+
+        let development = grouped_apps(&storefront, "", Some("Development"));
+        assert_eq!(development.len(), 1);
+        assert_eq!(development[0].1.len(), 1);
+        assert!(grouped_apps(&storefront, "", Some("Productivity")).is_empty());
     }
 }
