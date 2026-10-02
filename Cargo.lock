@@ -67,6 +67,7 @@ version = "0.1.0"
 dependencies = [
  "mochi-user-platform",
  "mochios-net-device-protocol",
+ "mochios-package-protocol",
  "serde",
  "serde_json",
  "sha2",
@@ -1035,7 +1036,11 @@ version = "0.1.0"
 [[package]]
 name = "mochios-net-device-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#0b494cb448832b1b5e3542eaa61c66d1d0c5904d"
+source = "git+https://github.com/mochiOS/syscalls#840f821249ab2b2c5acb74652456b7d187a863ff"
+
+[[package]]
+name = "mochios-package-protocol"
+version = "0.1.0"
 
 [[package]]
 name = "mochios-viewkit-gpu-protocol"

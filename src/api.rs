@@ -44,10 +44,15 @@ impl fmt::Display for ApiError {
                 write!(formatter, "network service unavailable (errno {errno})")
             }
             Self::Protocol => formatter.write_str("invalid network service response"),
-            Self::RequestIdMismatch => formatter.write_str("network response did not match request"),
+            Self::RequestIdMismatch => {
+                formatter.write_str("network response did not match request")
+            }
             Self::HandleMismatch => formatter.write_str("network response handle did not match"),
             Self::ServiceFailure { status, failure } => {
-                write!(formatter, "network request failed ({failure:?}, status {status})")
+                write!(
+                    formatter,
+                    "network request failed ({failure:?}, status {status})"
+                )
             }
             Self::ResponseTooLarge => formatter.write_str("store response is too large"),
             Self::Truncated => formatter.write_str("store response ended unexpectedly"),
@@ -157,11 +162,16 @@ fn start_async_get(
 }
 
 pub(crate) fn finish_icon_request(message: &[u8]) -> Option<(u64, Result<Vec<u8>, ApiError>)> {
-    finish_request(message, MAX_ICON_BYTES, |content_type| {
-        ["image/png", "image/jpeg", "image/webp"]
-            .iter()
-            .any(|supported| content_type.eq_ignore_ascii_case(supported))
-    }, |status| status == 200)
+    finish_request(
+        message,
+        MAX_ICON_BYTES,
+        |content_type| {
+            ["image/png", "image/jpeg", "image/webp"]
+                .iter()
+                .any(|supported| content_type.eq_ignore_ascii_case(supported))
+        },
+        |status| status == 200,
+    )
 }
 
 pub(crate) fn finish_release_request(
@@ -183,9 +193,7 @@ pub(crate) fn finish_release_request(
     })
 }
 
-pub(crate) fn finish_package_request(
-    message: &[u8],
-) -> Option<(u64, Result<Vec<u8>, ApiError>)> {
+pub(crate) fn finish_package_request(message: &[u8]) -> Option<(u64, Result<Vec<u8>, ApiError>)> {
     finish_request(
         message,
         MAX_PACKAGE_CHUNK_BYTES,
@@ -222,12 +230,7 @@ fn finish_request(
             let _ = close(request_id, result.handle);
             return Err(ApiError::HttpStatus(result.status_code));
         }
-        let content_type = result
-            .content_type
-            .split(';')
-            .next()
-            .unwrap_or("")
-            .trim();
+        let content_type = result.content_type.split(';').next().unwrap_or("").trim();
         if !valid_content_type(content_type) {
             let _ = close(request_id, result.handle);
             return Err(ApiError::InvalidContentType);
@@ -242,7 +245,12 @@ fn finish_request(
             return Err(ApiError::ResponseTooLarge);
         }
         let fetched = (|| {
-            read_stream(request_id, result.handle, HttpStream::Headers, headers_length)?;
+            read_stream(
+                request_id,
+                result.handle,
+                HttpStream::Headers,
+                headers_length,
+            )?;
             read_stream(request_id, result.handle, HttpStream::Body, body_length)
         })();
         let closed = close(request_id, result.handle);

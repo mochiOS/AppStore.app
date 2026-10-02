@@ -7,6 +7,7 @@ mod catalog;
 
 use api::{ApiError, DataRequest};
 use catalog::{CatalogApp, CatalogRelease, ReleaseResponse, Storefront};
+use mochios_package_protocol as package_protocol;
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::collections::HashSet;
@@ -35,8 +36,6 @@ const RELEASE_REQUEST_PREFIX: u64 = 0x5245_4c53_0000_0000;
 const PACKAGE_REQUEST_PREFIX: u64 = 0x504b_4744_0000_0000;
 const REQUEST_KIND_MASK: u64 = 0xffff_ffff_0000_0000;
 const REQUEST_SEQUENCE_MASK: u64 = 0x0000_0000_ffff_ffff;
-#[cfg(target_os = "mochios")]
-const INSTALL_REQUEST_OPCODE: u32 = 0x494e_5354;
 
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -55,6 +54,23 @@ struct PendingInstall {
     path: String,
     offset: usize,
     hasher: Sha256,
+    mutation: PackageMutation,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PackageMutation {
+    Install,
+    Update,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InstalledPackage {
+    package_id: String,
+    name: String,
+    version: String,
+    kind: String,
+    built_in: bool,
+    removable: bool,
 }
 
 #[derive(Clone)]
@@ -71,7 +87,9 @@ enum InstallStatus {
     Idle,
     Downloading { bundle_id: String },
     Installing { bundle_id: String },
+    Removing { bundle_id: String },
     Installed { bundle_id: String },
+    Removed { bundle_id: String },
     Failed { bundle_id: String, message: String },
 }
 
@@ -94,7 +112,9 @@ fn compatible_release(
     expected_bundle_id: &str,
 ) -> Result<Option<CatalogRelease>, String> {
     if response.bundle_id != expected_bundle_id {
-        return Err(String::from("The release response did not match this application."));
+        return Err(String::from(
+            "The release response did not match this application.",
+        ));
     }
     let Some(release) = response.releases.into_iter().next() else {
         return Ok(None);
@@ -117,6 +137,49 @@ fn compatible_release(
         ));
     }
     Ok(Some(release))
+}
+
+fn version_is_newer(candidate: &str, installed: &str) -> bool {
+    fn components(version: &str) -> Option<(Vec<u64>, Option<&str>)> {
+        let version = version.strip_prefix('v').unwrap_or(version);
+        let (core, suffix) = version
+            .split_once('-')
+            .map_or((version, None), |(core, suffix)| (core, Some(suffix)));
+        let numbers = core
+            .split('.')
+            .map(str::parse::<u64>)
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        (!numbers.is_empty()).then_some((numbers, suffix))
+    }
+    let (
+        Some((mut candidate_numbers, candidate_suffix)),
+        Some((mut installed_numbers, installed_suffix)),
+    ) = (components(candidate), components(installed))
+    else {
+        return false;
+    };
+    let length = candidate_numbers.len().max(installed_numbers.len());
+    candidate_numbers.resize(length, 0);
+    installed_numbers.resize(length, 0);
+    match candidate_numbers.cmp(&installed_numbers) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => match (candidate_suffix, installed_suffix) {
+            (None, Some(_)) => true,
+            (Some(candidate), Some(installed)) => candidate > installed,
+            _ => false,
+        },
+    }
+}
+
+fn installed_package<'a>(
+    packages: &'a [InstalledPackage],
+    package_id: &str,
+) -> Option<&'a InstalledPackage> {
+    packages
+        .iter()
+        .find(|package| package.package_id == package_id)
 }
 
 fn set_release_result(
@@ -248,6 +311,7 @@ struct AppTile {
     selected_app: State<Option<String>>,
     release_status: State<ReleaseStatus>,
     pending_release: State<Option<PendingRelease>>,
+    installed: bool,
     pressed: Cell<bool>,
 }
 
@@ -258,6 +322,7 @@ impl AppTile {
         selected_app: State<Option<String>>,
         release_status: State<ReleaseStatus>,
         pending_release: State<Option<PendingRelease>>,
+        installed_packages: &[InstalledPackage],
     ) -> Self {
         Self {
             app: app.clone(),
@@ -268,6 +333,7 @@ impl AppTile {
             selected_app,
             release_status,
             pending_release,
+            installed: installed_package(installed_packages, &app.bundle_id).is_some(),
             pressed: Cell::new(false),
         }
     }
@@ -290,7 +356,12 @@ impl AppTile {
     }
 
     fn name_bounds(bounds: Rect) -> Rect {
-        Rect::new(bounds.origin.x, bounds.origin.y + 96.0, bounds.size.width, 25.0)
+        Rect::new(
+            bounds.origin.x,
+            bounds.origin.y + 96.0,
+            bounds.size.width,
+            25.0,
+        )
     }
 
     fn button_bounds(bounds: Rect) -> Rect {
@@ -329,8 +400,12 @@ impl View for AppTile {
             .weight(500)
             .alignment(TextAlignment::Center)
             .paint(Self::name_bounds(bounds), context);
-        Button::new("Get")
-            .style(ButtonStyle::Accent)
+        Button::new(if self.installed { "Installed" } else { "Get" })
+            .style(if self.installed {
+                ButtonStyle::Standard
+            } else {
+                ButtonStyle::Accent
+            })
             .size(ButtonSize::Small)
             .radius(CornerRadius::Small)
             .accessibility_label(format!("Get {}", self.app.name))
@@ -396,7 +471,12 @@ fn app_matches_search(app: &CatalogApp, query: &str) -> bool {
         || app.name.to_ascii_lowercase().contains(&query)
         || app.developer.to_ascii_lowercase().contains(&query)
         || app.description.to_ascii_lowercase().contains(&query)
-        || app.subtitle.as_deref().unwrap_or("").to_ascii_lowercase().contains(&query)
+        || app
+            .subtitle
+            .as_deref()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .contains(&query)
         || app.bundle_id.to_ascii_lowercase().contains(&query)
 }
 
@@ -437,6 +517,7 @@ fn section_view(
     selected_app: State<Option<String>>,
     release_status: State<ReleaseStatus>,
     pending_release: State<Option<PendingRelease>>,
+    installed_packages: &[InstalledPackage],
 ) -> VStack {
     VStack::new()
         .alignment(StackAlignment::Stretch)
@@ -449,18 +530,16 @@ fn section_view(
                         Theme::current().spacing.extra_large,
                         Theme::current().spacing.double_extra_large,
                     )
-                    .children(
-                        apps.into_iter()
-                            .map(|app| {
-                                AppTile::new(
-                                    app,
-                                    icons,
-                                    selected_app.clone(),
-                                    release_status.clone(),
-                                    pending_release.clone(),
-                                )
-                            }),
-                    ),
+                    .children(apps.into_iter().map(|app| {
+                        AppTile::new(
+                            app,
+                            icons,
+                            selected_app.clone(),
+                            release_status.clone(),
+                            pending_release.clone(),
+                            installed_packages,
+                        )
+                    })),
             ),
         )
 }
@@ -473,6 +552,7 @@ fn catalog_content(
     selected_app: State<Option<String>>,
     release_status: State<ReleaseStatus>,
     pending_release: State<Option<PendingRelease>>,
+    installed_packages: &[InstalledPackage],
 ) -> VStack {
     let category = selection.strip_prefix("category:");
     let groups = grouped_apps(storefront, query, category);
@@ -487,6 +567,7 @@ fn catalog_content(
             selected_app.clone(),
             release_status.clone(),
             pending_release.clone(),
+            installed_packages,
         ));
     }
 
@@ -586,6 +667,7 @@ fn finish_install(
     pending: PendingInstall,
     pending_install: &State<Option<PendingInstall>>,
     install_status: &State<InstallStatus>,
+    installed_packages: &State<Vec<InstalledPackage>>,
 ) {
     pending_install.set(None);
     let digest = pending.hasher.finalize();
@@ -601,12 +683,18 @@ fn finish_install(
     install_status.set(InstallStatus::Installing {
         bundle_id: pending.release.bundle_id.clone(),
     });
-    let result = install_package(&pending.path);
+    let result = mutate_package(&pending.path, pending.mutation);
     let _ = fs::remove_file(&pending.path);
     match result {
-        Ok(()) => install_status.set(InstallStatus::Installed {
-            bundle_id: pending.release.bundle_id,
-        }),
+        Ok(()) => match refresh_installed_packages(installed_packages) {
+            Ok(()) => install_status.set(InstallStatus::Installed {
+                bundle_id: pending.release.bundle_id,
+            }),
+            Err(message) => install_status.set(InstallStatus::Failed {
+                bundle_id: pending.release.bundle_id,
+                message,
+            }),
+        },
         Err(message) => install_status.set(InstallStatus::Failed {
             bundle_id: pending.release.bundle_id,
             message,
@@ -619,6 +707,7 @@ fn consume_package_chunk(
     bytes: Vec<u8>,
     pending_install: &State<Option<PendingInstall>>,
     install_status: &State<InstallStatus>,
+    installed_packages: &State<Vec<InstalledPackage>>,
 ) {
     let package_size = pending.release.size as usize;
     let expected = (package_size - pending.offset).min(api::MAX_PACKAGE_CHUNK_BYTES);
@@ -651,9 +740,9 @@ fn consume_package_chunk(
     pending.hasher.update(&bytes);
     pending.offset += bytes.len();
     if pending.offset == package_size {
-        finish_install(pending, pending_install, install_status);
+        finish_install(pending, pending_install, install_status, installed_packages);
     } else {
-        request_package_chunk(pending, pending_install, install_status);
+        request_package_chunk(pending, pending_install, install_status, installed_packages);
     }
 }
 
@@ -661,6 +750,7 @@ fn request_package_chunk(
     mut pending: PendingInstall,
     pending_install: &State<Option<PendingInstall>>,
     install_status: &State<InstallStatus>,
+    installed_packages: &State<Vec<InstalledPackage>>,
 ) {
     let remaining = pending.release.size as usize - pending.offset;
     let length = remaining.min(api::MAX_PACKAGE_CHUNK_BYTES);
@@ -675,46 +765,149 @@ fn request_package_chunk(
         Ok(DataRequest::Pending) => pending_install.set(Some(pending)),
         Ok(DataRequest::Ready(bytes)) => {
             pending_install.set(None);
-            consume_package_chunk(pending, bytes, pending_install, install_status);
+            consume_package_chunk(
+                pending,
+                bytes,
+                pending_install,
+                install_status,
+                installed_packages,
+            );
         }
-        Err(error) => fail_install(
-            &pending,
-            error.to_string(),
-            pending_install,
-            install_status,
-        ),
+        Err(error) => fail_install(&pending, error.to_string(), pending_install, install_status),
     }
 }
 
 #[cfg(target_os = "mochios")]
-fn install_package(path: &str) -> Result<(), String> {
-    let service = mochi_user_platform::process::find_by_name("package.service")
-        .map_err(|error| format!("Package service unavailable (errno {}).", error.errno().unwrap_or(0)))?;
+fn package_service_call(request: package_protocol::Request<'_>) -> Result<(), String> {
+    let service =
+        mochi_user_platform::process::find_by_name("package.service").map_err(|error| {
+            format!(
+                "Package service unavailable (errno {}).",
+                error.errno().unwrap_or(0)
+            )
+        })?;
     if service == 0 {
         return Err(String::from("Package service is unavailable."));
     }
-    let mut request = Vec::with_capacity(4 + path.len());
-    request.extend_from_slice(&INSTALL_REQUEST_OPCODE.to_le_bytes());
-    request.extend_from_slice(path.as_bytes());
-    let mut reply = [0u8; 8];
-    let message = mochi_user_platform::ipc::call(service, &request, &mut reply)
-        .map_err(|error| format!("Installation failed (errno {}).", error.errno().unwrap_or(0)))?;
-    if (message & 0xffff_ffff) as usize != reply.len() {
-        return Err(String::from("Package service returned an invalid response."));
-    }
-    let status = u64::from_le_bytes(reply);
+    let request_id = next_request_id(PACKAGE_REQUEST_PREFIX);
+    let mut encoded = [0u8; package_protocol::HEADER_LEN + package_protocol::MAX_PATH_LEN];
+    let request_length = package_protocol::encode_request(request_id, request, &mut encoded)
+        .map_err(|_| String::from("The package request is invalid."))?;
+    let mut reply = [0u8; package_protocol::HEADER_LEN];
+    let message = mochi_user_platform::ipc::call(service, &encoded[..request_length], &mut reply)
+        .map_err(|error| {
+        format!(
+            "Package operation failed (errno {}).",
+            error.errno().unwrap_or(0)
+        )
+    })?;
+    let reply_length = (message & 0xffff_ffff) as usize;
+    let response = reply
+        .get(..reply_length)
+        .ok_or_else(|| String::from("Package service returned an invalid response."))?;
+    let status = package_protocol::decode_status(response, request_id)
+        .map_err(|_| String::from("Package service returned an invalid response."))?;
     if status == 0 {
         Ok(())
     } else {
-        Err(format!("Installation failed (errno {status})."))
+        Err(format!(
+            "Package operation failed (errno {}).",
+            status.unsigned_abs()
+        ))
     }
 }
 
+#[cfg(target_os = "mochios")]
+fn query_installed_packages() -> Result<Vec<InstalledPackage>, String> {
+    let service =
+        mochi_user_platform::process::find_by_name("package.service").map_err(|error| {
+            format!(
+                "Package service unavailable (errno {}).",
+                error.errno().unwrap_or(0)
+            )
+        })?;
+    if service == 0 {
+        return Err(String::from("Package service is unavailable."));
+    }
+    let request_id = next_request_id(PACKAGE_REQUEST_PREFIX);
+    let mut request = [0u8; package_protocol::HEADER_LEN];
+    let request_length =
+        package_protocol::encode_request(request_id, package_protocol::Request::List, &mut request)
+            .map_err(|_| String::from("Unable to encode the package query."))?;
+    let mut reply = vec![0u8; package_protocol::MAX_MESSAGE_LEN];
+    let message = mochi_user_platform::ipc::call(service, &request[..request_length], &mut reply)
+        .map_err(|error| {
+        format!(
+            "Unable to read installed packages (errno {}).",
+            error.errno().unwrap_or(0)
+        )
+    })?;
+    let reply_length = (message & 0xffff_ffff) as usize;
+    let response = reply
+        .get(..reply_length)
+        .ok_or_else(|| String::from("Package service returned an invalid package list."))?;
+    let records = match package_protocol::decode_list(response, request_id) {
+        Ok(records) => records,
+        Err(_) => {
+            if let Ok(status) = package_protocol::decode_status(response, request_id) {
+                return Err(format!(
+                    "Unable to read installed packages (errno {}).",
+                    status.unsigned_abs()
+                ));
+            }
+            return Err(String::from(
+                "Package service returned an invalid package list.",
+            ));
+        }
+    };
+    let mut packages = Vec::new();
+    for record in records {
+        let record = record
+            .map_err(|_| String::from("Package service returned an invalid package record."))?;
+        packages.push(InstalledPackage {
+            package_id: record.package_id.to_string(),
+            name: record.name.to_string(),
+            version: record.version.to_string(),
+            kind: record.kind.to_string(),
+            built_in: record.flags & package_protocol::PACKAGE_FLAG_BUILT_IN != 0,
+            removable: record.flags & package_protocol::PACKAGE_FLAG_REMOVABLE != 0,
+        });
+    }
+    packages.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.package_id.cmp(&right.package_id))
+    });
+    Ok(packages)
+}
+
 #[cfg(not(target_os = "mochios"))]
-fn install_package(_path: &str) -> Result<(), String> {
+fn query_installed_packages() -> Result<Vec<InstalledPackage>, String> {
+    Ok(Vec::new())
+}
+
+#[cfg(not(target_os = "mochios"))]
+fn package_service_call(_request: package_protocol::Request<'_>) -> Result<(), String> {
     Err(String::from(
-        "Installation is available only when App Store is running on mochiOS.",
+        "Package management is available only when App Store is running on mochiOS.",
     ))
+}
+
+fn refresh_installed_packages(packages: &State<Vec<InstalledPackage>>) -> Result<(), String> {
+    let refreshed = query_installed_packages()?;
+    packages.set(refreshed);
+    Ok(())
+}
+
+fn mutate_package(path: &str, mutation: PackageMutation) -> Result<(), String> {
+    package_service_call(match mutation {
+        PackageMutation::Install => package_protocol::Request::Install(path),
+        PackageMutation::Update => package_protocol::Request::Update(path),
+    })
+}
+
+fn remove_package(package_id: &str) -> Result<(), String> {
+    package_service_call(package_protocol::Request::Remove(package_id))
 }
 
 fn start_install(
@@ -722,6 +915,8 @@ fn start_install(
     release: &CatalogRelease,
     pending_install: &State<Option<PendingInstall>>,
     install_status: &State<InstallStatus>,
+    installed_packages: &State<Vec<InstalledPackage>>,
+    mutation: PackageMutation,
 ) {
     let safe_bundle_id: String = app
         .bundle_id
@@ -753,11 +948,12 @@ fn start_install(
         path,
         offset: 0,
         hasher: Sha256::new(),
+        mutation,
     };
     install_status.set(InstallStatus::Downloading {
         bundle_id: app.bundle_id.clone(),
     });
-    request_package_chunk(pending, pending_install, install_status);
+    request_package_chunk(pending, pending_install, install_status, installed_packages);
 }
 
 fn app_detail(
@@ -767,12 +963,24 @@ fn app_detail(
     release_status: State<ReleaseStatus>,
     pending_install: State<Option<PendingInstall>>,
     install_status: State<InstallStatus>,
+    installed_packages: State<Vec<InstalledPackage>>,
+    package_query_error: Option<String>,
 ) -> VStack {
     let back_selection = selected_app.clone();
     let release = match release_status.get() {
         ReleaseStatus::Ready(release) if release.bundle_id == app.bundle_id => Some(release),
         _ => None,
     };
+    let installed = installed_package(&installed_packages.get(), &app.bundle_id).cloned();
+    let mutation = if installed.is_some() {
+        PackageMutation::Update
+    } else {
+        PackageMutation::Install
+    };
+    let has_update = installed
+        .as_ref()
+        .zip(release.as_ref())
+        .is_some_and(|(installed, release)| version_is_newer(&release.version, &installed.version));
     let (button_label, button_enabled) = match install_status.get() {
         InstallStatus::Downloading { ref bundle_id } if bundle_id == &app.bundle_id => {
             ("Downloading", false)
@@ -780,10 +988,18 @@ fn app_detail(
         InstallStatus::Installing { ref bundle_id } if bundle_id == &app.bundle_id => {
             ("Installing", false)
         }
-        InstallStatus::Downloading { .. } | InstallStatus::Installing { .. } => ("Busy", false),
+        InstallStatus::Removing { ref bundle_id } if bundle_id == &app.bundle_id => {
+            ("Removing", false)
+        }
+        InstallStatus::Downloading { .. }
+        | InstallStatus::Installing { .. }
+        | InstallStatus::Removing { .. } => ("Busy", false),
         InstallStatus::Installed { ref bundle_id } if bundle_id == &app.bundle_id => {
             ("Installed", false)
         }
+        _ if package_query_error.is_some() => ("Unavailable", false),
+        _ if has_update => ("Update", true),
+        _ if installed.is_some() => ("Installed", false),
         _ if release.is_some() => ("Get", true),
         _ => ("Get", false),
     };
@@ -795,12 +1011,15 @@ fn app_detail(
         let install_app = app.clone();
         let install_pending = pending_install.clone();
         let install_status = install_status.clone();
+        let install_packages = installed_packages.clone();
         get_button = get_button.on_click(move || {
             start_install(
                 &install_app,
                 &release,
                 &install_pending,
                 &install_status,
+                &install_packages,
+                mutation,
             )
         });
     }
@@ -818,13 +1037,19 @@ fn app_detail(
         InstallStatus::Installed { ref bundle_id } if bundle_id == &app.bundle_id => {
             Some(String::from("The application was installed."))
         }
+        InstallStatus::Removed { ref bundle_id } if bundle_id == &app.bundle_id => {
+            Some(String::from("The application was removed."))
+        }
+        _ if package_query_error.is_some() => package_query_error.clone(),
         _ => match release_status.get() {
             ReleaseStatus::Loading { ref bundle_id } if bundle_id == &app.bundle_id => {
                 Some(String::from("Checking compatibility…"))
             }
-            ReleaseStatus::Unavailable { ref bundle_id } if bundle_id == &app.bundle_id => Some(
-                String::from("No x86_64 release compatible with this version of mochiOS is available."),
-            ),
+            ReleaseStatus::Unavailable { ref bundle_id } if bundle_id == &app.bundle_id => {
+                Some(String::from(
+                    "No x86_64 release compatible with this version of mochiOS is available.",
+                ))
+            }
             ReleaseStatus::Failed {
                 ref bundle_id,
                 ref message,
@@ -832,6 +1057,36 @@ fn app_detail(
             _ => None,
         },
     };
+    let mut actions = HStack::new()
+        .alignment(StackAlignment::Center)
+        .gap(StackGap::Small)
+        .child(get_button);
+    if let Some(installed) = installed.filter(|package| package.removable) {
+        let remove_status = install_status.clone();
+        let remove_packages = installed_packages.clone();
+        let bundle_id = app.bundle_id.clone();
+        actions = actions.child(
+            Button::new("Remove")
+                .style(ButtonStyle::Standard)
+                .size(ButtonSize::Small)
+                .on_click(move || {
+                    remove_status.set(InstallStatus::Removing {
+                        bundle_id: bundle_id.clone(),
+                    });
+                    match remove_package(&installed.package_id)
+                        .and_then(|()| refresh_installed_packages(&remove_packages))
+                    {
+                        Ok(()) => remove_status.set(InstallStatus::Removed {
+                            bundle_id: bundle_id.clone(),
+                        }),
+                        Err(message) => remove_status.set(InstallStatus::Failed {
+                            bundle_id: bundle_id.clone(),
+                            message,
+                        }),
+                    }
+                }),
+        );
+    }
     let mut content = VStack::new()
         .alignment(StackAlignment::Stretch)
         .gap(StackGap::DoubleExtraLarge)
@@ -855,7 +1110,7 @@ fn app_detail(
                         .gap(StackGap::ExtraSmall)
                         .child(Text::styled(app.name.clone(), TextRole::TitleLarge).weight(600))
                         .child(Text::body(app.developer.clone()).tone(TextTone::Secondary))
-                        .child(get_button),
+                        .child(actions),
                 ),
         )
         .child(Text::body(app.description.clone()))
@@ -866,23 +1121,92 @@ fn app_detail(
     content
 }
 
-fn library_content(selection: &str) -> VStack {
-    let (title, message) = if selection == SELECTION_UPDATES {
-        (
-            "Updates",
-            "Application updates will appear here when package installation is available.",
-        )
-    } else {
-        (
-            "Installed",
-            "Installed applications will appear here when package installation is available.",
-        )
-    };
-    VStack::new()
+fn library_content(
+    storefront: &Storefront,
+    selection: &str,
+    icons: &[LoadedIcon],
+    installed_packages: &[InstalledPackage],
+    selected_app: State<Option<String>>,
+    release_status: State<ReleaseStatus>,
+    pending_release: State<Option<PendingRelease>>,
+    package_query_error: Option<&str>,
+) -> VStack {
+    let updates_only = selection == SELECTION_UPDATES;
+    let title = if updates_only { "Updates" } else { "Installed" };
+    let mut seen = HashSet::new();
+    let apps: Vec<&CatalogApp> = storefront
+        .sections
+        .iter()
+        .flat_map(|section| section.apps.iter())
+        .filter(|app| {
+            seen.insert(app.bundle_id.as_str())
+                && installed_package(installed_packages, &app.bundle_id).is_some_and(|installed| {
+                    !updates_only || version_is_newer(&app.version, &installed.version)
+                })
+        })
+        .collect();
+    let mut content = VStack::new()
         .alignment(StackAlignment::Stretch)
-        .gap(StackGap::Small)
-        .child(Text::styled(title, TextRole::TitleMedium).weight(600))
-        .child(Text::body(message).tone(TextTone::Secondary))
+        .gap(StackGap::DoubleExtraLarge)
+        .child(Text::styled(title, TextRole::TitleMedium).weight(600));
+    if let Some(error) = package_query_error {
+        return content
+            .child(
+                Text::body("Installed applications could not be loaded.").tone(TextTone::Secondary),
+            )
+            .child(Text::metadata(error));
+    }
+    if apps.is_empty() {
+        content = content.child(
+            Text::body(if updates_only {
+                "All applications are up to date."
+            } else {
+                "No applications are installed."
+            })
+            .tone(TextTone::Secondary),
+        );
+    } else {
+        content = content.child(
+            AdaptiveGrid::new(APP_TILE_WIDTH, APP_TILE_HEIGHT)
+                .spacing(
+                    Theme::current().spacing.extra_large,
+                    Theme::current().spacing.double_extra_large,
+                )
+                .children(apps.into_iter().map(|app| {
+                    AppTile::new(
+                        app,
+                        icons,
+                        selected_app.clone(),
+                        release_status.clone(),
+                        pending_release.clone(),
+                        installed_packages,
+                    )
+                })),
+        );
+    }
+    if !updates_only {
+        let catalog_ids: HashSet<&str> = storefront
+            .sections
+            .iter()
+            .flat_map(|section| section.apps.iter())
+            .map(|app| app.bundle_id.as_str())
+            .collect();
+        for package in installed_packages.iter().filter(|package| {
+            package.kind == "application" && !catalog_ids.contains(package.package_id.as_str())
+        }) {
+            content = content.child(
+                VStack::new()
+                    .alignment(StackAlignment::Start)
+                    .gap(StackGap::ExtraSmall)
+                    .child(Text::styled(package.name.clone(), TextRole::Label).weight(600))
+                    .child(Text::metadata(format!(
+                        "{} · {}",
+                        package.package_id, package.version
+                    ))),
+            );
+        }
+    }
+    content
 }
 
 fn loading_content() -> VStack {
@@ -917,6 +1241,8 @@ fn detail(
     pending_release: State<Option<PendingRelease>>,
     pending_install: State<Option<PendingInstall>>,
     install_status: State<InstallStatus>,
+    installed_packages: State<Vec<InstalledPackage>>,
+    package_query_error: State<Option<String>>,
 ) -> VStack {
     let content = match catalog {
         CatalogStatus::Ready(storefront) if selected_app.get().is_some() => {
@@ -929,22 +1255,32 @@ fn detail(
                     release_status.clone(),
                     pending_install.clone(),
                     install_status.clone(),
+                    installed_packages.clone(),
+                    package_query_error.get(),
                 ),
-                None => {
-                    catalog_content(
-                        storefront,
-                        &search.get(),
-                        &selection.get(),
-                        &icons.get(),
-                        selected_app.clone(),
-                        release_status.clone(),
-                        pending_release.clone(),
-                    )
-                }
+                None => catalog_content(
+                    storefront,
+                    &search.get(),
+                    &selection.get(),
+                    &icons.get(),
+                    selected_app.clone(),
+                    release_status.clone(),
+                    pending_release.clone(),
+                    &installed_packages.get(),
+                ),
             }
         }
-        CatalogStatus::Ready(_) if selection.get().starts_with("library:") => {
-            library_content(&selection.get())
+        CatalogStatus::Ready(storefront) if selection.get().starts_with("library:") => {
+            library_content(
+                storefront,
+                &selection.get(),
+                &icons.get(),
+                &installed_packages.get(),
+                selected_app.clone(),
+                release_status.clone(),
+                pending_release.clone(),
+                package_query_error.get().as_deref(),
+            )
         }
         CatalogStatus::Ready(storefront) => catalog_content(
             storefront,
@@ -954,6 +1290,7 @@ fn detail(
             selected_app,
             release_status,
             pending_release,
+            &installed_packages.get(),
         ),
         CatalogStatus::Loading => loading_content(),
         CatalogStatus::Failed(error) => error_content(error),
@@ -1033,26 +1370,30 @@ struct AppStoreApp {
     pending_install: State<Option<PendingInstall>>,
     icons: State<Vec<LoadedIcon>>,
     pending_icons: Vec<(u64, String)>,
+    installed_packages: State<Vec<InstalledPackage>>,
+    package_query_error: State<Option<String>>,
 }
 
 impl App for AppStoreApp {
     type Body = StoreView;
 
     fn new() -> Self {
+        let (installed_packages, package_query_error) = match query_installed_packages() {
+            Ok(packages) => (packages, None),
+            Err(error) => (Vec::new(), Some(error)),
+        };
         let request_id = next_request_id(STOREFRONT_REQUEST_PREFIX);
         let (catalog, pending_catalog, icons, pending_icons) =
             match api::start_storefront_request(request_id) {
-                Ok(DataRequest::Pending) => {
-                    (CatalogStatus::Loading, Some(request_id), Vec::new(), Vec::new())
-                }
+                Ok(DataRequest::Pending) => (
+                    CatalogStatus::Loading,
+                    Some(request_id),
+                    Vec::new(),
+                    Vec::new(),
+                ),
                 Ok(DataRequest::Ready(storefront)) => {
                     let (icons, pending_icons) = start_icon_requests(&storefront);
-                    (
-                        CatalogStatus::Ready(storefront),
-                        None,
-                        icons,
-                        pending_icons,
-                    )
+                    (CatalogStatus::Ready(storefront), None, icons, pending_icons)
                 }
                 Err(error) => (
                     CatalogStatus::Failed(error.to_string()),
@@ -1074,6 +1415,8 @@ impl App for AppStoreApp {
             pending_install: State::new(None),
             icons: State::new(icons),
             pending_icons,
+            installed_packages: State::new(installed_packages),
+            package_query_error: State::new(package_query_error),
         }
     }
 
@@ -1106,6 +1449,8 @@ impl App for AppStoreApp {
                 self.pending_release.clone(),
                 self.pending_install.clone(),
                 self.install_status.clone(),
+                self.installed_packages.clone(),
+                self.package_query_error.clone(),
             ),
         )
         .flexible_sidebar(200.0, 240.0, 280.0)
@@ -1187,6 +1532,7 @@ impl App for AppStoreApp {
                     bytes,
                     &self.pending_install,
                     &self.install_status,
+                    &self.installed_packages,
                 ),
                 Err(error) => fail_install(
                     &pending,
@@ -1209,8 +1555,17 @@ fn main() -> Result<(), ViewKitError> {
 mod tests {
     use super::{
         CatalogApp, ReleaseResponse, Storefront, app_matches_search, compatible_release,
-        grouped_apps, package_digest_matches,
+        grouped_apps, package_digest_matches, version_is_newer,
     };
+
+    #[test]
+    fn update_versions_are_compared_numerically() {
+        assert!(version_is_newer("1.10.0", "1.9.9"));
+        assert!(version_is_newer("2.0", "1.99.99"));
+        assert!(version_is_newer("1.0.0", "1.0.0-beta.1"));
+        assert!(!version_is_newer("1.0", "1.0.0"));
+        assert!(!version_is_newer("development", "1.0.0"));
+    }
 
     #[test]
     fn catalog_search_matches_visible_app_details() {

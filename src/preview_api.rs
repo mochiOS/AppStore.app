@@ -21,7 +21,9 @@ impl fmt::Display for ApiError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Request(message) => write!(formatter, "App Store API request failed: {message}"),
-            Self::InvalidJson(error) => write!(formatter, "App Store API returned invalid JSON: {error}"),
+            Self::InvalidJson(error) => {
+                write!(formatter, "App Store API returned invalid JSON: {error}")
+            }
         }
     }
 }
@@ -145,9 +147,7 @@ pub(crate) fn start_package_request(
     .map(DataRequest::Ready)
 }
 
-pub(crate) fn finish_package_request(
-    _message: &[u8],
-) -> Option<(u64, Result<Vec<u8>, ApiError>)> {
+pub(crate) fn finish_package_request(_message: &[u8]) -> Option<(u64, Result<Vec<u8>, ApiError>)> {
     None
 }
 

@@ -28,5 +28,8 @@ requires = [
     "ipc.server",
     "net.http.request",
     "package.install",
+    "package.inspect",
+    "package.remove",
+    "package.update",
     "window.create",
 ]
