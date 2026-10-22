@@ -9,24 +9,22 @@ use api::{ApiError, DataRequest};
 use catalog::{CatalogApp, CatalogRelease, ReleaseResponse, Storefront};
 use mochios_package_protocol as package_protocol;
 use sha2::{Digest, Sha256};
-use std::cell::Cell;
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::Write;
+use std::rc::Rc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use viewkit::event::{EventContext, EventResult, ViewEvent};
-use viewkit::platform::PointerButton;
 use viewkit::prelude::*;
 use viewkit::view::{Constraints, MeasureContext, PaintContext};
 
 const LIBRARY: [&str; 2] = ["Updates", "Installed"];
 const APP_ICON_RADIUS: f32 = 14.0;
-const APP_TILE_WIDTH: f32 = 184.0;
-const APP_TILE_HEIGHT: f32 = 158.0;
-const APP_ICON_SIZE: f32 = 96.0;
-const APP_BUTTON_WIDTH: f32 = 64.0;
-const APP_BUTTON_HEIGHT: f32 = 28.0;
+const APP_TILE_WIDTH: f32 = 300.0;
+const APP_TILE_HEIGHT: f32 = 100.0;
+const APP_ICON_SIZE: f32 = 64.0;
 const MAX_ICON_DIMENSION: u32 = 2_048;
 const SELECTION_ALL: &str = "all";
 const SELECTION_UPDATES: &str = "library:updates";
@@ -39,7 +37,58 @@ const REQUEST_SEQUENCE_MASK: u64 = 0x0000_0000_ffff_ffff;
 
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-type StoreView = NavigationSplitView<VStack, VStack>;
+type StoreView = NavigationSplitView<Scroll, VStack>;
+
+#[derive(Default)]
+struct StoreUi {
+    search: TextFieldInteractionState,
+    sidebar_scroll: ScrollState,
+    browse_scroll: ScrollState,
+    detail_scroll: ScrollState,
+    buttons: RefCell<BTreeMap<String, ButtonInteractionState>>,
+}
+impl StoreUi {
+    fn button(&self, key: impl Into<String>, label: impl Into<String>) -> Button {
+        let interaction = self
+            .buttons
+            .borrow_mut()
+            .entry(key.into())
+            .or_default()
+            .clone();
+        Button::with_interaction_and_label(interaction, label)
+    }
+}
+
+struct StoreSearch {
+    field: TextField,
+    query: State<String>,
+    selected_app: State<Option<String>>,
+    scroll: ScrollState,
+    input: TextFieldInteractionState,
+}
+impl View for StoreSearch {
+    fn measure(&self, constraints: Constraints, context: &mut MeasureContext<'_>) -> Size {
+        self.field.measure(constraints, context)
+    }
+    fn paint(&self, bounds: Rect, context: &mut PaintContext<'_>) {
+        self.field.paint(bounds, context);
+    }
+    fn handle_event(
+        &self,
+        bounds: Rect,
+        event: &ViewEvent,
+        context: &mut EventContext<'_>,
+    ) -> EventResult {
+        let result = self.field.handle_event(bounds, event, context);
+        let value = self.input.value();
+        if value != self.query.get() {
+            self.query.set(value);
+            self.selected_app.set(None);
+            self.scroll.reset();
+        }
+        result
+    }
+}
 
 #[derive(Clone)]
 struct PendingRelease {
@@ -238,14 +287,20 @@ fn navigation(
     search: State<String>,
     selection: State<String>,
     selected_app: State<Option<String>>,
+    ui: &Rc<StoreUi>,
 ) -> VStack {
     let all_selection = selection.clone();
     let all_selected_app = selected_app.clone();
+    let all_search = search.clone();
+    let all_ui = ui.clone();
     let mut browse = SidebarSection::new("Explore").item(
-        SidebarItem::new("All Apps")
+        SidebarItem::new("Discover")
             .symbol(SymbolName::Grid)
-            .selected(selection.get() == SELECTION_ALL)
+            .selected(selection.get() == SELECTION_ALL && search.get().trim().is_empty())
             .on_select(move || {
+                all_search.set(String::new());
+                all_ui.search.set_value(String::new());
+                all_ui.browse_scroll.reset();
                 all_selection.set(String::from(SELECTION_ALL));
                 all_selected_app.set(None);
             }),
@@ -255,11 +310,16 @@ fn navigation(
             let target = category_selection(&category.name);
             let category_selection = selection.clone();
             let category_selected_app = selected_app.clone();
+            let category_search = search.clone();
+            let category_ui = ui.clone();
             browse = browse.item(
                 SidebarItem::new(category.name.clone())
                     .symbol(SymbolName::Tag)
-                    .selected(selection.get() == target)
+                    .selected(selection.get() == target && search.get().trim().is_empty())
                     .on_select(move || {
+                        category_search.set(String::new());
+                        category_ui.search.set_value(String::new());
+                        category_ui.browse_scroll.reset();
                         category_selection.set(target.clone());
                         category_selected_app.set(None);
                     }),
@@ -275,11 +335,16 @@ fn navigation(
         };
         let library_selection = selection.clone();
         let library_selected_app = selected_app.clone();
+        let library_search = search.clone();
+        let library_ui = ui.clone();
         library = library.item(
             SidebarItem::new(label)
                 .symbol(symbol)
-                .selected(selection.get() == target)
+                .selected(selection.get() == target && search.get().trim().is_empty())
                 .on_select(move || {
+                    library_search.set(String::new());
+                    library_ui.search.set_value(String::new());
+                    library_ui.browse_scroll.reset();
                     library_selection.set(String::from(target));
                     library_selected_app.set(None);
                 }),
@@ -288,181 +353,93 @@ fn navigation(
 
     VStack::new()
         .alignment(StackAlignment::Stretch)
-        .gap(StackGap::Large)
+        .gap(StackGap::ExtraLarge)
         .child(
-            TextField::new(search.binding())
-                .placeholder("Search applications")
-                .size(TextFieldSize::Small)
-                .radius(CornerRadius::Custom(6.0))
-                .leading_symbol(SymbolName::Search)
-                .frame(
-                    Theme::current().layout.compact_form_control_width,
-                    Theme::current().layout.control_height,
-                ),
+            Padding::only(0.0, 0.0, 0.0, Theme::current().spacing.small)
+                .content(Text::styled("App Store", TextRole::TitleSmall)),
+        )
+        .child(
+            StoreSearch {
+                field: TextField::with_interaction(ui.search.clone())
+                    .placeholder("Search Apps")
+                    .leading_symbol(SymbolName::Search),
+                input: ui.search.clone(),
+                query: search,
+                selected_app,
+                scroll: ui.browse_scroll.clone(),
+            }
+            .height(Theme::current().controls.height),
         )
         .child(browse)
         .child(library)
-        .child(Spacer::new())
 }
 
-struct AppTile {
-    app: CatalogApp,
-    icon: Option<ImageData>,
+fn default_app_icon() -> Option<SvgData> {
+    static ICON: OnceLock<Option<SvgData>> = OnceLock::new();
+    ICON.get_or_init(|| SvgData::decode(include_bytes!("../../binder/resources/appicon.svg")).ok())
+        .clone()
+}
+
+fn app_tile(
+    app: &CatalogApp,
+    icons: &[LoadedIcon],
     selected_app: State<Option<String>>,
     release_status: State<ReleaseStatus>,
     pending_release: State<Option<PendingRelease>>,
-    installed: bool,
-    pressed: Cell<bool>,
-}
-
-impl AppTile {
-    fn new(
-        app: &CatalogApp,
-        icons: &[LoadedIcon],
-        selected_app: State<Option<String>>,
-        release_status: State<ReleaseStatus>,
-        pending_release: State<Option<PendingRelease>>,
-        installed_packages: &[InstalledPackage],
-    ) -> Self {
-        Self {
-            app: app.clone(),
-            icon: icons
-                .iter()
-                .find(|icon| icon.bundle_id == app.bundle_id)
-                .map(|icon| icon.image.clone()),
-            selected_app,
-            release_status,
-            pending_release,
-            installed: installed_package(installed_packages, &app.bundle_id).is_some(),
-            pressed: Cell::new(false),
-        }
-    }
-
-    fn default_icon() -> Option<SvgData> {
-        static ICON: OnceLock<Option<SvgData>> = OnceLock::new();
-        ICON.get_or_init(|| {
-            SvgData::decode(include_bytes!("../../binder/resources/appicon.svg")).ok()
+    installed_packages: &[InstalledPackage],
+    ui: &Rc<StoreUi>,
+) -> Button {
+    let installed = installed_package(installed_packages, &app.bundle_id).is_some();
+    let subtitle = app
+        .subtitle
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(&app.category);
+    let bundle_id = app.bundle_id.clone();
+    let scroll = ui.detail_scroll.clone();
+    ui.button(format!("app:{}", app.bundle_id), app.name.clone())
+        .style(ButtonStyle::Ghost)
+        .alignment(ZStackAlignment::Leading)
+        .accessibility_label(format!("View {} by {}", app.name, app.developer))
+        .content(
+            Padding::symmetric(
+                Theme::current().spacing.small,
+                Theme::current().spacing.small,
+            )
+            .content(
+                HStack::new()
+                    .alignment(StackAlignment::Center)
+                    .gap(StackGap::Medium)
+                    .child(app_icon(app, icons, APP_ICON_SIZE))
+                    .child(
+                        VStack::new()
+                            .alignment(StackAlignment::Stretch)
+                            .gap(StackGap::ExtraSmall)
+                            .child(Text::label(app.name.clone()).weight(600))
+                            .child(Text::caption(subtitle).tone(TextTone::Secondary))
+                            .child(
+                                Text::caption(format!(
+                                    "{}{}",
+                                    app.developer,
+                                    if installed { " · Installed" } else { "" }
+                                ))
+                                .tone(TextTone::Secondary),
+                            )
+                            .layout()
+                            .flex_grow(1.0)
+                            .flex_shrink(1.0),
+                    )
+                    .child(
+                        Icon::new(SymbolName::ChevronRight)
+                            .size(Theme::current().layout.compact_icon_size)
+                            .color(Theme::current().colors.text_tertiary),
+                    ),
+            ),
+        )
+        .on_click(move || {
+            scroll.reset();
+            open_app(&bundle_id, &selected_app, &release_status, &pending_release);
         })
-        .clone()
-    }
-
-    fn icon_bounds(bounds: Rect) -> Rect {
-        Rect::new(
-            bounds.origin.x + (bounds.size.width - APP_ICON_SIZE) * 0.5,
-            bounds.origin.y,
-            APP_ICON_SIZE,
-            APP_ICON_SIZE,
-        )
-    }
-
-    fn name_bounds(bounds: Rect) -> Rect {
-        Rect::new(
-            bounds.origin.x,
-            bounds.origin.y + 96.0,
-            bounds.size.width,
-            25.0,
-        )
-    }
-
-    fn button_bounds(bounds: Rect) -> Rect {
-        Rect::new(
-            bounds.origin.x + (bounds.size.width - APP_BUTTON_WIDTH) * 0.5,
-            bounds.origin.y + 130.0,
-            APP_BUTTON_WIDTH,
-            APP_BUTTON_HEIGHT,
-        )
-    }
-}
-
-impl View for AppTile {
-    fn measure(&self, constraints: Constraints, _context: &mut MeasureContext<'_>) -> Size {
-        constraints.constrain(Size::new(APP_TILE_WIDTH, APP_TILE_HEIGHT))
-    }
-
-    fn paint(&self, bounds: Rect, context: &mut PaintContext<'_>) {
-        let mut node = AccessibilityNode::new(AccessibilityRole::Button, bounds);
-        node.label = Some(format!("Open {}", self.app.name));
-        context.record_accessibility(node);
-        if let Some(icon) = self.icon.clone() {
-            Image::new(icon)
-                .content_mode(ImageContentMode::Fill)
-                .radius(CornerRadius::Custom(APP_ICON_RADIUS))
-                .accessibility_label(format!("{} icon", self.app.name))
-                .paint(Self::icon_bounds(bounds), context);
-        } else if let Some(icon) = Self::default_icon() {
-            Svg::new(icon)
-                .content_mode(SvgContentMode::Fill)
-                .radius(CornerRadius::Custom(APP_ICON_RADIUS))
-                .accessibility_label(format!("{} icon", self.app.name))
-                .paint(Self::icon_bounds(bounds), context);
-        }
-        Text::styled(self.app.name.clone(), TextRole::Label)
-            .weight(500)
-            .alignment(TextAlignment::Center)
-            .paint(Self::name_bounds(bounds), context);
-        Button::new(if self.installed { "Installed" } else { "Get" })
-            .style(if self.installed {
-                ButtonStyle::Standard
-            } else {
-                ButtonStyle::Accent
-            })
-            .size(ButtonSize::Small)
-            .radius(CornerRadius::Small)
-            .accessibility_label(format!("Get {}", self.app.name))
-            .paint(Self::button_bounds(bounds), context);
-    }
-
-    fn handle_event(
-        &self,
-        bounds: Rect,
-        event: &ViewEvent,
-        context: &mut EventContext<'_>,
-    ) -> EventResult {
-        match event {
-            ViewEvent::PointerMoved { position } => {
-                if bounds.contains(*position) {
-                    context.set_cursor(CursorIcon::Pointer);
-                    EventResult::Consumed
-                } else if self.pressed.get() {
-                    EventResult::Consumed
-                } else {
-                    EventResult::Ignored
-                }
-            }
-            ViewEvent::PointerPressed {
-                position,
-                button: PointerButton::Primary,
-            } if bounds.contains(*position) => {
-                self.pressed.set(true);
-                EventResult::Consumed
-            }
-            ViewEvent::PointerReleased {
-                position,
-                button: PointerButton::Primary,
-            } => {
-                let was_pressed = self.pressed.replace(false);
-                if was_pressed && bounds.contains(*position) {
-                    open_app(
-                        &self.app.bundle_id,
-                        &self.selected_app,
-                        &self.release_status,
-                        &self.pending_release,
-                    );
-                    context.request_redraw();
-                }
-                if was_pressed {
-                    EventResult::Consumed
-                } else {
-                    EventResult::Ignored
-                }
-            }
-            ViewEvent::PointerLeft => {
-                self.pressed.set(false);
-                EventResult::Ignored
-            }
-            _ => EventResult::Ignored,
-        }
-    }
 }
 
 fn app_matches_search(app: &CatalogApp, query: &str) -> bool {
@@ -512,35 +489,44 @@ fn grouped_apps<'a>(
 
 fn section_view(
     title: String,
+    subtitle: Option<&str>,
     apps: Vec<&CatalogApp>,
     icons: &[LoadedIcon],
     selected_app: State<Option<String>>,
     release_status: State<ReleaseStatus>,
     pending_release: State<Option<PendingRelease>>,
     installed_packages: &[InstalledPackage],
+    ui: &Rc<StoreUi>,
 ) -> VStack {
+    let mut heading = VStack::new()
+        .alignment(StackAlignment::Stretch)
+        .gap(StackGap::ExtraSmall)
+        .child(Text::styled(title, TextRole::TitleSmall));
+    if let Some(subtitle) = subtitle.filter(|s| !s.trim().is_empty()) {
+        heading = heading.child(Text::caption(subtitle).tone(TextTone::Secondary));
+    }
     VStack::new()
         .alignment(StackAlignment::Stretch)
-        .gap(StackGap::DoubleExtraLarge)
-        .child(Text::styled(title, TextRole::TitleMedium).weight(600))
+        .gap(StackGap::Small)
+        .child(heading)
         .child(
-            Padding::only(0.0, 0.0, 0.0, Theme::current().spacing.large).content(
-                AdaptiveGrid::new(APP_TILE_WIDTH, APP_TILE_HEIGHT)
-                    .spacing(
-                        Theme::current().spacing.extra_large,
-                        Theme::current().spacing.double_extra_large,
+            AdaptiveGrid::new(APP_TILE_WIDTH, APP_TILE_HEIGHT)
+                .fill_columns()
+                .spacing(
+                    Theme::current().spacing.large,
+                    Theme::current().spacing.small,
+                )
+                .children(apps.into_iter().map(|app| {
+                    app_tile(
+                        app,
+                        icons,
+                        selected_app.clone(),
+                        release_status.clone(),
+                        pending_release.clone(),
+                        installed_packages,
+                        ui,
                     )
-                    .children(apps.into_iter().map(|app| {
-                        AppTile::new(
-                            app,
-                            icons,
-                            selected_app.clone(),
-                            release_status.clone(),
-                            pending_release.clone(),
-                            installed_packages,
-                        )
-                    })),
-            ),
+                })),
         )
 }
 
@@ -553,35 +539,104 @@ fn catalog_content(
     release_status: State<ReleaseStatus>,
     pending_release: State<Option<PendingRelease>>,
     installed_packages: &[InstalledPackage],
+    ui: &Rc<StoreUi>,
 ) -> VStack {
-    let category = selection.strip_prefix("category:");
+    let searching = !query.trim().is_empty();
+    let category = if searching {
+        None
+    } else {
+        selection.strip_prefix("category:")
+    };
     let groups = grouped_apps(storefront, query, category);
+    let count: usize = groups.iter().map(|(_, apps)| apps.len()).sum();
+    let title = if searching {
+        "Search Results"
+    } else {
+        category.unwrap_or("Discover")
+    };
+    let noun = if count == 1 {
+        "application"
+    } else {
+        "applications"
+    };
+    let subtitle = if searching {
+        format!("{count} {noun} for “{}”", query.trim())
+    } else if category.is_some() {
+        format!("{count} {noun}")
+    } else {
+        String::from("Applications for your mochiOS desktop")
+    };
     let mut content = VStack::new()
         .alignment(StackAlignment::Stretch)
-        .gap(StackGap::TripleExtraLarge);
-    for (title, apps) in groups.iter() {
-        content = content.child(section_view(
-            title.clone(),
-            apps.clone(),
-            icons,
-            selected_app.clone(),
-            release_status.clone(),
-            pending_release.clone(),
-            installed_packages,
-        ));
+        .gap(StackGap::ExtraLarge)
+        .child(
+            VStack::new()
+                .alignment(StackAlignment::Stretch)
+                .gap(StackGap::ExtraSmall)
+                .child(Text::styled(title, TextRole::TitleMedium))
+                .child(Text::caption(subtitle).tone(TextTone::Secondary)),
+        );
+    if !searching && category.is_none() {
+        let mut seen = HashSet::new();
+        for section in &storefront.sections {
+            let apps: Vec<_> = section
+                .apps
+                .iter()
+                .filter(|app| seen.insert(app.bundle_id.as_str()))
+                .collect();
+            if apps.is_empty() {
+                continue;
+            }
+            content = content.child(section_view(
+                section.title.clone(),
+                section.subtitle.as_deref(),
+                apps,
+                icons,
+                selected_app.clone(),
+                release_status.clone(),
+                pending_release.clone(),
+                installed_packages,
+                ui,
+            ));
+        }
+    } else {
+        for (title, apps) in groups.iter() {
+            content = content.child(section_view(
+                title.clone(),
+                None,
+                apps.clone(),
+                icons,
+                selected_app.clone(),
+                release_status.clone(),
+                pending_release.clone(),
+                installed_packages,
+                ui,
+            ));
+        }
     }
-
     if groups.is_empty() {
         content = content.child(
-            Text::styled(
-                if query.trim().is_empty() {
-                    "No apps are currently available"
-                } else {
-                    "No matching apps"
-                },
-                TextRole::TitleMedium,
-            )
-            .weight(600),
+            Padding::symmetric(0.0, Theme::current().spacing.extra_large).content(
+                VStack::new()
+                    .alignment(StackAlignment::Stretch)
+                    .gap(StackGap::Small)
+                    .child(
+                        Text::label(if searching {
+                            "No matching applications"
+                        } else {
+                            "No applications available"
+                        })
+                        .weight(600),
+                    )
+                    .child(
+                        Text::caption(if searching {
+                            "Try an application name, developer, or a different search."
+                        } else {
+                            "Applications will appear here when they are available in the catalog."
+                        })
+                        .tone(TextTone::Secondary),
+                    ),
+            ),
         );
     }
     content
@@ -606,7 +661,7 @@ fn app_icon(app: &CatalogApp, icons: &[LoadedIcon], size: f32) -> StackChild {
             .radius(CornerRadius::Custom(APP_ICON_RADIUS))
             .accessibility_label(format!("{} icon", app.name))
             .frame(size, size)
-    } else if let Some(icon) = AppTile::default_icon() {
+    } else if let Some(icon) = default_app_icon() {
         Svg::new(icon)
             .content_mode(SvgContentMode::Fill)
             .radius(CornerRadius::Custom(APP_ICON_RADIUS))
@@ -959,14 +1014,13 @@ fn start_install(
 fn app_detail(
     app: &CatalogApp,
     icons: &[LoadedIcon],
-    selected_app: State<Option<String>>,
     release_status: State<ReleaseStatus>,
     pending_install: State<Option<PendingInstall>>,
     install_status: State<InstallStatus>,
     installed_packages: State<Vec<InstalledPackage>>,
     package_query_error: Option<String>,
+    ui: &Rc<StoreUi>,
 ) -> VStack {
-    let back_selection = selected_app.clone();
     let release = match release_status.get() {
         ReleaseStatus::Ready(release) if release.bundle_id == app.bundle_id => Some(release),
         _ => None,
@@ -1003,9 +1057,16 @@ fn app_detail(
         _ if release.is_some() => ("Get", true),
         _ => ("Get", false),
     };
-    let mut get_button = Button::new(button_label)
+    let version = release
+        .as_ref()
+        .map_or_else(|| app.version.clone(), |r| r.version.clone());
+    let size = release
+        .as_ref()
+        .map(|r| format!("{:.1} MiB", r.size as f64 / 1_048_576.0));
+    let mut get_button = ui
+        .button(format!("install:{}", app.bundle_id), button_label)
         .style(ButtonStyle::Accent)
-        .size(ButtonSize::Small)
+        .size(ButtonSize::Medium)
         .enabled(button_enabled);
     if let Some(release) = release {
         let install_app = app.clone();
@@ -1066,9 +1127,10 @@ fn app_detail(
         let remove_packages = installed_packages.clone();
         let bundle_id = app.bundle_id.clone();
         actions = actions.child(
-            Button::new("Remove")
+            ui.button(format!("remove:{}", app.bundle_id), "Remove")
                 .style(ButtonStyle::Standard)
-                .size(ButtonSize::Small)
+                .size(ButtonSize::Medium)
+                .enabled(pending_install.get().is_none())
                 .on_click(move || {
                     remove_status.set(InstallStatus::Removing {
                         bundle_id: bundle_id.clone(),
@@ -1087,38 +1149,80 @@ fn app_detail(
                 }),
         );
     }
+    let mut information = SettingsSection::new("Information")
+        .grouped()
+        .row(settings_value("Version", "", version).compact())
+        .row(settings_value("Developer", "", app.developer.clone()).compact());
+    if !app.category.trim().is_empty() {
+        information =
+            information.row(settings_value("Category", "", app.category.clone()).compact());
+    }
+    if let Some(size) = size {
+        information = information.row(settings_value("Download Size", "", size).compact());
+    }
     let mut content = VStack::new()
         .alignment(StackAlignment::Stretch)
-        .gap(StackGap::DoubleExtraLarge)
-        .child(
-            Button::new("Back")
-                .style(ButtonStyle::Ghost)
-                .size(ButtonSize::Small)
-                .alignment(ZStackAlignment::Leading)
-                .on_click(move || back_selection.set(None))
-                .layout()
-                .width(72.0),
-        )
+        .gap(StackGap::ExtraLarge)
         .child(
             HStack::new()
                 .alignment(StackAlignment::Center)
-                .gap(StackGap::ExtraLarge)
-                .child(app_icon(app, icons, 112.0))
+                .gap(StackGap::Large)
+                .child(app_icon(app, icons, 96.0))
                 .child(
                     VStack::new()
-                        .alignment(StackAlignment::Start)
-                        .gap(StackGap::ExtraSmall)
-                        .child(Text::styled(app.name.clone(), TextRole::TitleLarge).weight(600))
-                        .child(Text::body(app.developer.clone()).tone(TextTone::Secondary))
-                        .child(actions),
+                        .alignment(StackAlignment::Stretch)
+                        .gap(StackGap::Small)
+                        .child(Text::styled(app.name.clone(), TextRole::TitleMedium))
+                        .child(
+                            Text::caption(
+                                app.subtitle
+                                    .as_deref()
+                                    .filter(|s| !s.trim().is_empty())
+                                    .unwrap_or(&app.developer),
+                            )
+                            .tone(TextTone::Secondary),
+                        )
+                        .child(actions)
+                        .layout()
+                        .flex_grow(1.0)
+                        .flex_shrink(1.0),
                 ),
-        )
-        .child(Text::body(app.description.clone()))
-        .child(Text::metadata(app.category.clone()));
+        );
     if let Some(message) = status_message {
-        content = content.child(Text::body(message).tone(TextTone::Secondary));
+        let failed = matches!(install_status.get(), InstallStatus::Failed { ref bundle_id, .. } if bundle_id == &app.bundle_id)
+            || matches!(release_status.get(), ReleaseStatus::Failed { ref bundle_id, .. } if bundle_id == &app.bundle_id);
+        content = content.child(Text::caption(message).color(if failed {
+            Theme::current().colors.destructive
+        } else {
+            Theme::current().colors.text_secondary
+        }));
+    }
+    if let Some(pending) = pending_install
+        .get()
+        .filter(|p| p.release.bundle_id == app.bundle_id)
+    {
+        let percent = if pending.release.size > 0 {
+            pending.offset as f64 * 100.0 / pending.release.size as f64
+        } else {
+            0.0
+        };
+        content = content
+            .child(Text::caption(format!("Downloaded {percent:.0}%")).tone(TextTone::Secondary));
     }
     content
+        .child(Divider::new())
+        .child(
+            VStack::new()
+                .alignment(StackAlignment::Stretch)
+                .gap(StackGap::Small)
+                .child(Text::styled("About", TextRole::TitleSmall))
+                .child(Text::body(if app.description.trim().is_empty() {
+                    "No description is available."
+                } else {
+                    &app.description
+                })),
+        )
+        .child(information)
 }
 
 fn library_content(
@@ -1130,6 +1234,7 @@ fn library_content(
     release_status: State<ReleaseStatus>,
     pending_release: State<Option<PendingRelease>>,
     package_query_error: Option<&str>,
+    ui: &Rc<StoreUi>,
 ) -> VStack {
     let updates_only = selection == SELECTION_UPDATES;
     let title = if updates_only { "Updates" } else { "Installed" };
@@ -1145,10 +1250,24 @@ fn library_content(
                 })
         })
         .collect();
+    let catalog_ids: HashSet<&str> = storefront
+        .sections
+        .iter()
+        .flat_map(|section| section.apps.iter())
+        .map(|app| app.bundle_id.as_str())
+        .collect();
+    let other_packages: Vec<_> = installed_packages
+        .iter()
+        .filter(|package| {
+            !updates_only
+                && package.kind == "application"
+                && !catalog_ids.contains(package.package_id.as_str())
+        })
+        .collect();
     let mut content = VStack::new()
         .alignment(StackAlignment::Stretch)
         .gap(StackGap::DoubleExtraLarge)
-        .child(Text::styled(title, TextRole::TitleMedium).weight(600));
+        .child(Text::styled(title, TextRole::TitleMedium));
     if let Some(error) = package_query_error {
         return content
             .child(
@@ -1156,7 +1275,7 @@ fn library_content(
             )
             .child(Text::metadata(error));
     }
-    if apps.is_empty() {
+    if apps.is_empty() && other_packages.is_empty() {
         content = content.child(
             Text::body(if updates_only {
                 "All applications are up to date."
@@ -1165,46 +1284,44 @@ fn library_content(
             })
             .tone(TextTone::Secondary),
         );
-    } else {
+    } else if !apps.is_empty() {
         content = content.child(
             AdaptiveGrid::new(APP_TILE_WIDTH, APP_TILE_HEIGHT)
+                .fill_columns()
                 .spacing(
-                    Theme::current().spacing.extra_large,
-                    Theme::current().spacing.double_extra_large,
+                    Theme::current().spacing.large,
+                    Theme::current().spacing.small,
                 )
                 .children(apps.into_iter().map(|app| {
-                    AppTile::new(
+                    app_tile(
                         app,
                         icons,
                         selected_app.clone(),
                         release_status.clone(),
                         pending_release.clone(),
                         installed_packages,
+                        ui,
                     )
                 })),
         );
     }
-    if !updates_only {
-        let catalog_ids: HashSet<&str> = storefront
-            .sections
-            .iter()
-            .flat_map(|section| section.apps.iter())
-            .map(|app| app.bundle_id.as_str())
-            .collect();
-        for package in installed_packages.iter().filter(|package| {
-            package.kind == "application" && !catalog_ids.contains(package.package_id.as_str())
-        }) {
-            content = content.child(
-                VStack::new()
-                    .alignment(StackAlignment::Start)
-                    .gap(StackGap::ExtraSmall)
-                    .child(Text::styled(package.name.clone(), TextRole::Label).weight(600))
-                    .child(Text::metadata(format!(
-                        "{} · {}",
-                        package.package_id, package.version
-                    ))),
-            );
-        }
+    if !other_packages.is_empty() {
+        content = content.child(
+            SettingsSection::new("Other Installed Applications")
+                .grouped()
+                .rows(other_packages.into_iter().map(|package| {
+                    settings_value(
+                        package.name.clone(),
+                        if package.built_in {
+                            "Included with mochiOS"
+                        } else {
+                            "Not listed in this catalog"
+                        },
+                        package.version.clone(),
+                    )
+                    .compact()
+                })),
+        );
     }
     content
 }
@@ -1243,7 +1360,10 @@ fn detail(
     install_status: State<InstallStatus>,
     installed_packages: State<Vec<InstalledPackage>>,
     package_query_error: State<Option<String>>,
+    ui: &Rc<StoreUi>,
 ) -> VStack {
+    let is_detail = selected_app.get().is_some();
+    let back_selection = selected_app.clone();
     let content = match catalog {
         CatalogStatus::Ready(storefront) if selected_app.get().is_some() => {
             let selected = selected_app.get().unwrap_or_default();
@@ -1251,12 +1371,12 @@ fn detail(
                 Some(app) => app_detail(
                     app,
                     &icons.get(),
-                    selected_app.clone(),
                     release_status.clone(),
                     pending_install.clone(),
                     install_status.clone(),
                     installed_packages.clone(),
                     package_query_error.get(),
+                    ui,
                 ),
                 None => catalog_content(
                     storefront,
@@ -1267,10 +1387,13 @@ fn detail(
                     release_status.clone(),
                     pending_release.clone(),
                     &installed_packages.get(),
+                    ui,
                 ),
             }
         }
-        CatalogStatus::Ready(storefront) if selection.get().starts_with("library:") => {
+        CatalogStatus::Ready(storefront)
+            if selection.get().starts_with("library:") && search.get().trim().is_empty() =>
+        {
             library_content(
                 storefront,
                 &selection.get(),
@@ -1280,6 +1403,7 @@ fn detail(
                 release_status.clone(),
                 pending_release.clone(),
                 package_query_error.get().as_deref(),
+                ui,
             )
         }
         CatalogStatus::Ready(storefront) => catalog_content(
@@ -1291,6 +1415,7 @@ fn detail(
             release_status,
             pending_release,
             &installed_packages.get(),
+            ui,
         ),
         CatalogStatus::Loading => loading_content(),
         CatalogStatus::Failed(error) => error_content(error),
@@ -1300,18 +1425,58 @@ fn detail(
         .background(Rectangle::new().color(RectangleColor::Surface))
         .content(
             Padding::only(
-                Theme::current().spacing.medium,
-                Theme::current().spacing.medium,
+                Theme::current().spacing.large,
+                Theme::current().spacing.large,
                 Theme::current().spacing.extra_large,
-                Theme::current().spacing.medium,
+                Theme::current().spacing.large,
             )
             .content(content),
         );
 
-    VStack::new()
+    let mut page = VStack::new()
         .alignment(StackAlignment::Stretch)
-        .gap(StackGap::None)
-        .child(Scroll::vertical(surface).layout().flex_grow(1.0))
+        .gap(StackGap::None);
+    if is_detail {
+        page = page.child(
+            Padding::symmetric(
+                Theme::current().spacing.large,
+                Theme::current().spacing.small,
+            )
+            .content(
+                HStack::new().child(
+                    ui.button("back", "Back")
+                        .style(ButtonStyle::Ghost)
+                        .size(ButtonSize::Small)
+                        .content(
+                            HStack::new()
+                                .alignment(StackAlignment::Center)
+                                .gap(StackGap::Small)
+                                .child(
+                                    Icon::new(SymbolName::ChevronLeft)
+                                        .size(Theme::current().layout.compact_icon_size),
+                                )
+                                .child(Text::label("Back")),
+                        )
+                        .on_click(move || back_selection.set(None)),
+                ),
+            )
+            .layout()
+            .flex_shrink(0.0),
+        );
+    }
+    let scroll = if is_detail {
+        ui.detail_scroll.clone()
+    } else {
+        ui.browse_scroll.clone()
+    };
+    page.child(
+        Scroll::new(scroll)
+            .axis(ScrollAxis::Vertical)
+            .content(surface)
+            .layout()
+            .flex_grow(1.0)
+            .flex_shrink(1.0),
+    )
 }
 
 #[derive(Clone)]
@@ -1358,6 +1523,7 @@ fn start_icon_requests(storefront: &Storefront) -> (Vec<LoadedIcon>, Vec<(u64, S
 }
 
 struct AppStoreApp {
+    ui: Rc<StoreUi>,
     catalog: CatalogStatus,
     catalog_revision: State<u64>,
     pending_catalog: Option<u64>,
@@ -1403,6 +1569,7 @@ impl App for AppStoreApp {
                 ),
             };
         Self {
+            ui: Rc::new(StoreUi::default()),
             catalog,
             catalog_revision: State::new(0),
             pending_catalog,
@@ -1433,12 +1600,15 @@ impl App for AppStoreApp {
             CatalogStatus::Loading | CatalogStatus::Failed(_) => None,
         };
         NavigationSplitView::new(
-            navigation(
-                storefront,
-                self.search.clone(),
-                self.selection.clone(),
-                self.selected_app.clone(),
-            ),
+            Scroll::new(self.ui.sidebar_scroll.clone())
+                .axis(ScrollAxis::Vertical)
+                .content(navigation(
+                    storefront,
+                    self.search.clone(),
+                    self.selection.clone(),
+                    self.selected_app.clone(),
+                    &self.ui,
+                )),
             detail(
                 &self.catalog,
                 self.search.clone(),
@@ -1451,10 +1621,11 @@ impl App for AppStoreApp {
                 self.install_status.clone(),
                 self.installed_packages.clone(),
                 self.package_query_error.clone(),
+                &self.ui,
             ),
         )
         .flexible_sidebar(200.0, 240.0, 280.0)
-        .minimum_detail_width(520.0)
+        .minimum_detail_width(420.0)
         .shows_divider(false)
     }
 
@@ -1557,6 +1728,79 @@ mod tests {
         CatalogApp, ReleaseResponse, Storefront, app_matches_search, compatible_release,
         grouped_apps, package_digest_matches, version_is_newer,
     };
+
+    #[test]
+    fn search_from_a_detail_page_updates_results_and_survives_reconstruction() {
+        use super::*;
+        use viewkit::typography::TextMeasurer;
+        let ui = Rc::new(StoreUi::default());
+        let query = State::new(String::new());
+        let selected = State::new(Some(String::from("org.example.app")));
+        ui.search.set_focused(true);
+        let make_search = || StoreSearch {
+            field: TextField::with_interaction(ui.search.clone()),
+            input: ui.search.clone(),
+            query: query.clone(),
+            selected_app: selected.clone(),
+            scroll: ui.browse_scroll.clone(),
+        };
+        let theme = Theme::LIGHT;
+        let mut text = TextMeasurer::new();
+        let mut context = EventContext::new(&theme, &theme.typography, &mut text);
+        let bounds = Rect::new(0.0, 0.0, 216.0, 30.0);
+        make_search().handle_event(
+            bounds,
+            &ViewEvent::TextInput {
+                text: String::from("note"),
+            },
+            &mut context,
+        );
+        assert_eq!(query.get(), "note");
+        assert!(selected.get().is_none());
+        make_search().handle_event(
+            bounds,
+            &ViewEvent::TextInput {
+                text: String::from("s"),
+            },
+            &mut context,
+        );
+        assert_eq!(query.get(), "notes");
+        assert!(ui.search.is_focused());
+    }
+
+    #[test]
+    fn global_search_finds_apps_outside_the_selected_category() {
+        use super::*;
+        use viewkit::{
+            draw_command::{DisplayList, DrawCommand},
+            typography::TextMeasurer,
+        };
+        let storefront: Storefront = serde_json::from_str(r#"{"sections":[{"title":"Apps","apps":[
+            {"bundle_id":"org.example.notes","name":"Notes","version":"1.0","developer":"mochiOS","category":"Productivity"},
+            {"bundle_id":"org.example.paint","name":"Paint","version":"1.0","developer":"mochiOS","category":"Graphics"}
+        ]}]}"#).unwrap();
+        let ui = Rc::new(StoreUi::default());
+        let content = catalog_content(
+            &storefront,
+            "Paint",
+            "category:Productivity",
+            &[],
+            State::new(None),
+            State::new(ReleaseStatus::Idle),
+            State::new(None),
+            &[],
+            &ui,
+        );
+        let mut list = DisplayList::new();
+        let theme = Theme::LIGHT;
+        let mut text = TextMeasurer::new();
+        content.paint(
+            Rect::new(0.0, 0.0, 752.0, 500.0),
+            &mut PaintContext::new(&mut list, &theme, &theme.typography, &mut text),
+        );
+        assert!(list.commands().iter().any(|cmd| matches!(cmd,
+            DrawCommand::DrawText { command } if command.text == "Paint")));
+    }
 
     #[test]
     fn update_versions_are_compared_numerically() {

@@ -26,3 +26,12 @@ verification. Temporary packages are removed after success or failure.
 The storefront can still contain legacy releases whose architecture and ABI
 are unknown. They remain visible but are deliberately not installable; there is
 no AdHoc or unfiltered download fallback.
+
+The native interface separates Discover, catalog categories, global search,
+and the Installed/Updates library. Discover preserves section titles and
+subtitles supplied by the server. Adaptive app rows show the application,
+purpose and developer; opening a row shows its description and release
+information, with the actual Get/Update/Remove actions in the detail view.
+Search input, button interaction and browse/detail scroll positions survive
+view reconstruction. The interface uses the shared ViewKit/omochi controls
+and the existing application artwork, fonts and theme.
