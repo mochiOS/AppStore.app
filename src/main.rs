@@ -401,6 +401,7 @@ fn app_tile(
         .style(ButtonStyle::Ghost)
         .alignment(ZStackAlignment::Leading)
         .accessibility_label(format!("View {} by {}", app.name, app.developer))
+        .content_padding(false)
         .content(
             Padding::symmetric(
                 Theme::current().spacing.small,
