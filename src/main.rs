@@ -1705,6 +1705,7 @@ impl AppStoreApp {
         let wide = NavigationSplitView::new(sidebar, page.clone())
             .flexible_sidebar(ui::SIDEBAR_MINIMUM, 240.0, 280.0)
             .minimum_detail_width(ui::DETAIL_MINIMUM)
+            .detail_owns_surface(true)
             .shows_divider(false);
         let compact = VStack::new()
             .alignment(StackAlignment::Stretch)

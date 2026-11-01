@@ -199,7 +199,7 @@ mod tests {
         let mut nodes = Vec::new();
         let mut text = TextMeasurer::new();
         let bounds = Rect::new(0.0, 0.0, width, 700.0);
-        app.store_view().paint(
+        Surface::app().content(app.store_view()).paint(
             bounds,
             &mut PaintContext::new(&mut list, theme, &theme.typography, &mut text)
                 .with_viewport_bounds(bounds)
@@ -216,6 +216,35 @@ mod tests {
             sha256: "0".repeat(64),
             architecture: Some("x86_64".into()),
             abi: Some("mochios-1".into()),
+        }
+    }
+
+    #[test]
+    fn pane_corner_exposes_chrome_instead_of_a_second_pane_background() {
+        let app = store();
+        for theme in [Theme::LIGHT, Theme::DARK] {
+            for detail in [false, true] {
+                app.selected_app.set(detail.then(|| "org.example.notes".into()));
+                let (list, _) = paint(&app, 1040.0, &theme);
+                let (index, rect, radii) = list.commands().iter().enumerate().find_map(|(i, cmd)| {
+                    match cmd {
+                        DrawCommand::PushRoundedCornersClip { rect, radii }
+                            if rect.origin.x == 240.0 && rect.origin.y > 0.0 => Some((i, *rect, *radii)),
+                        _ => None,
+                    }
+                }).expect("toolbar/sidebar junction must have a rounded pane");
+                assert_eq!(radii, [theme.radius.extra_large, 0.0, 0.0, 0.0]);
+                let corner = rect.origin;
+                assert!(!viewkit::continuous_corner::shape(rect, radii).contains((corner.x, corner.y)));
+                let backdrop = list.commands()[..index].iter().rev().find_map(|cmd| {
+                    match cmd {
+                        DrawCommand::FillRect { rect, color } if rect.contains(corner) => Some(*color),
+                        _ => None,
+                    }
+                });
+                assert_eq!(backdrop, Some(theme.colors.surface_subtle),
+                    "the cutout must expose chrome, not a second pane background");
+            }
         }
     }
 
