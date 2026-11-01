@@ -66,6 +66,7 @@ name = "appstore"
 version = "0.1.0"
 dependencies = [
  "mochi-user-platform",
+ "mochios-appcore",
  "mochios-net-device-protocol",
  "mochios-package-protocol",
  "serde",
@@ -1069,8 +1070,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "mochios-appcore"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "mochi-user-platform",
+ "mochios-filesystem-protocol",
+ "mochios-fonts",
+ "mochios-keychain-protocol",
+ "mochios-posix-client",
+ "mochios-posix-protocol",
+ "mochios-workspace-protocol",
+ "toml",
+ "viewkit",
+ "zeroize",
+]
+
+[[package]]
 name = "mochios-capability-protocol"
 version = "0.1.0"
+
+[[package]]
+name = "mochios-filesystem-protocol"
+version = "0.1.0"
+
+[[package]]
+name = "mochios-fonts"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+ "ttf-parser",
+]
+
+[[package]]
+name = "mochios-keychain-protocol"
+version = "0.1.0"
+dependencies = [
+ "zeroize",
+]
 
 [[package]]
 name = "mochios-net-device-protocol"
@@ -1078,6 +1115,29 @@ version = "0.1.0"
 
 [[package]]
 name = "mochios-package-protocol"
+version = "0.1.0"
+
+[[package]]
+name = "mochios-posix-client"
+version = "0.1.0"
+dependencies = [
+ "mnu-abi",
+ "mochi-user-syscall",
+ "mochios-filesystem-protocol",
+ "mochios-net-device-protocol",
+ "mochios-posix-protocol",
+]
+
+[[package]]
+name = "mochios-posix-protocol"
+version = "0.1.0"
+dependencies = [
+ "mnu-abi",
+ "mochios-user-protocol",
+]
+
+[[package]]
+name = "mochios-user-protocol"
 version = "0.1.0"
 
 [[package]]
@@ -1966,6 +2026,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_spanned"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2280,6 +2349,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
+name = "toml"
+version = "1.1.6+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "920602543f0911ab71da12c50d59701da54c196d1a2bf5cb4b75667f137a406a"
+dependencies = [
+ "indexmap",
+ "serde_core",
+ "serde_spanned",
+ "toml_datetime",
+ "toml_parser",
+ "toml_writer",
+ "winnow",
+]
+
+[[package]]
 name = "toml_datetime"
 version = "1.1.1+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2308,6 +2392,12 @@ checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
 dependencies = [
  "winnow",
 ]
+
+[[package]]
+name = "toml_writer"
+version = "1.1.2+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tracing"
@@ -2419,6 +2509,7 @@ dependencies = [
  "image",
  "mochi-user-platform",
  "mochi-user-syscall",
+ "mochios-fonts",
  "mochios-viewkit-gpu-protocol",
  "pollster",
  "postcard",
@@ -2431,8 +2522,10 @@ dependencies = [
  "tiny-skia",
  "ui_layout",
  "unicode-script",
+ "unicode-segmentation",
  "wgpu",
  "winit",
+ "zeroize",
 ]
 
 [[package]]
@@ -3164,6 +3257,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroize"
+version = "1.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
+
+[[package]]
 name = "zlib-rs"
 version = "0.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3199,11 +3298,11 @@ name = "mnu"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "mochi-user-runtime"
+name = "mochios-mdriver-protocol"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "mochios-filesystem-protocol"
+name = "mochi-user-runtime"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -3212,14 +3311,6 @@ version = "0.1.0"
 
 [[patch.unused]]
 name = "mochios-linux-portal-protocol"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "mochios-posix-client"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "mochios-posix-protocol"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -3232,10 +3323,6 @@ version = "0.1.0"
 
 [[patch.unused]]
 name = "mochios-user-database"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "mochios-user-protocol"
 version = "0.1.0"
 
 [[patch.unused]]

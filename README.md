@@ -16,7 +16,7 @@ AppStore server -> catalog client -> catalog model -> ViewKit UI
 - Server: <https://github.com/mochiOS/AppStore>
 - Native client: <https://github.com/mochiOS/AppStore.app>
 
-Selecting a catalog tile opens its detail view. The client then requests the
+Selecting a catalog row opens its detail view. The client then requests the
 latest `x86_64` / `mochios-1` release, downloads the MPKG through the public
 download endpoint in bounded ranges, verifies the advertised size and SHA-256,
 and hands the temporary file to `package.service`. The service remains the
@@ -35,3 +35,21 @@ information, with the actual Get/Update/Remove actions in the detail view.
 Search input, button interaction and browse/detail scroll positions survive
 view reconstruction. The interface uses the shared ViewKit/omochi controls
 and the existing application artwork, fonts and theme.
+
+The application uses AppCore's standard startup entry point. Page navigation
+uses Toolbar and ActionToolbar; the scrollable detail content uses Surface::pane
+for standard background, continuous corners, clipping and pointer dispatch.
+Catalog entries use native ListRow interactions, typography and spacing rather
+than a separately styled button surface. The page title stays in the toolbar;
+sections and app descriptions retain their own reading hierarchy.
+
+Below the combined sidebar/detail minimum width, the sidebar is replaced with
+a native navigation picker and search field above the page. Discover, categories,
+Installed and Updates remain reachable, including while an app detail is open.
+The picker is retained across rebuilds so an open native menu can finish its
+selection. Browsing and detail keep separate scroll positions.
+
+Package download progress uses the standard ProgressBar and the real received
+byte offset/advertised package size. Checking compatibility, installing, errors
+and unavailable releases retain distinct text and action states; installation
+completion is still determined only by the existing package-service result.
