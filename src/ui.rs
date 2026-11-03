@@ -188,6 +188,8 @@ mod tests {
             pending_icons: Vec::new(),
             installed_packages: State::new(Vec::new()),
             package_query_error: State::new(None),
+            setup: vec![],
+            setup_attempted: false,
         }
     }
     fn paint(
@@ -430,6 +432,39 @@ mod tests {
         }
         assert!(app.selected_app.get().is_none());
         assert_eq!(app.ui.browse_scroll.offset_y(), 100.0);
+    }
+
+    #[test]
+    fn initial_setup_requires_an_actual_installed_package_record() {
+        let mut app = store();
+        app.setup = vec![setup::Application {
+            bundle_id: "org.example.notes".into(),
+            name: "Notes".into(),
+        }];
+        assert!(app.setup_banner().is_some());
+        let (_, nodes) = paint(&app, 1040.0, &Theme::LIGHT);
+        assert!(
+            nodes
+                .iter()
+                .any(|node| node.label.as_deref() == Some("View in Store") && node.enabled)
+        );
+        app.installed_packages.set(vec![InstalledPackage {
+            package_id: "org.example.notes".into(),
+            name: "Notes".into(),
+            version: "1.0.0".into(),
+            kind: "application".into(),
+            built_in: false,
+            removable: true,
+        }]);
+        assert!(app.setup_banner().is_none());
+        app.installed_packages.set(Vec::new());
+        app.setup[0].bundle_id = "org.example.unpublished".into();
+        let (_, nodes) = paint(&app, 1040.0, &Theme::LIGHT);
+        assert!(
+            nodes
+                .iter()
+                .any(|node| node.label.as_deref() == Some("Not available yet") && !node.enabled)
+        );
     }
 
     #[test]

@@ -4,6 +4,7 @@ mod api;
 #[path = "preview_api.rs"]
 mod api;
 mod catalog;
+mod setup;
 mod ui;
 
 use api::{ApiError, DataRequest};
@@ -1524,6 +1525,8 @@ struct AppStoreApp {
     pending_icons: Vec<(u64, String)>,
     installed_packages: State<Vec<InstalledPackage>>,
     package_query_error: State<Option<String>>,
+    setup: Vec<setup::Application>,
+    setup_attempted: bool,
 }
 
 impl App for AppStoreApp {
@@ -1554,7 +1557,7 @@ impl App for AppStoreApp {
                     Vec::new(),
                 ),
             };
-        Self {
+        let mut app = Self {
             ui: Rc::new(StoreUi::default()),
             catalog,
             catalog_revision: State::new(0),
@@ -1570,7 +1573,11 @@ impl App for AppStoreApp {
             pending_icons,
             installed_packages: State::new(installed_packages),
             package_query_error: State::new(package_query_error),
-        }
+            setup: setup::load(),
+            setup_attempted: false,
+        };
+        app.open_initial_application();
+        app
     }
 
     fn window(&self) -> WindowOptions {
@@ -1603,6 +1610,7 @@ impl App for AppStoreApp {
                     self.catalog = CatalogStatus::Failed(error.to_string());
                 }
             }
+            self.open_initial_application();
             self.catalog_revision.update(|revision| {
                 *revision = revision.wrapping_add(1);
             });
@@ -1673,13 +1681,78 @@ impl App for AppStoreApp {
 }
 
 impl AppStoreApp {
+    fn open_initial_application(&mut self) {
+        if self.setup_attempted {
+            return;
+        }
+        let CatalogStatus::Ready(storefront) = &self.catalog else {
+            return;
+        };
+        self.setup_attempted = true;
+        if let Some(app) = self.setup.iter().find(|app| {
+            installed_package(&self.installed_packages.get(), &app.bundle_id).is_none()
+                && catalog_app(storefront, &app.bundle_id).is_some()
+        }) {
+            open_app(
+                &app.bundle_id,
+                &self.selected_app,
+                &self.release_status,
+                &self.pending_release,
+            );
+        }
+    }
+    fn setup_banner(&self) -> Option<VStack> {
+        let installed = self.installed_packages.get();
+        let pending: Vec<_> = self
+            .setup
+            .iter()
+            .filter(|app| installed_package(&installed, &app.bundle_id).is_none())
+            .collect();
+        if pending.is_empty() {
+            return None;
+        }
+        let mut body = VStack::new()
+            .alignment(StackAlignment::Stretch)
+            .gap(StackGap::Small)
+            .child(Text::styled("Finish Setup", TextRole::TitleSmall))
+            .child(Text::caption(
+                "Choose an application below to finish setting up your desktop.",
+            ));
+        for app in pending {
+            let available = matches!(
+                &self.catalog,
+                CatalogStatus::Ready(storefront) if catalog_app(storefront, &app.bundle_id).is_some()
+            );
+            let status = if available {
+                "View in Store"
+            } else {
+                "Not available yet"
+            };
+            let selected = self.selected_app.clone();
+            let release = self.release_status.clone();
+            let request = self.pending_release.clone();
+            let id = app.bundle_id.clone();
+            body = body.child(
+                HStack::new()
+                    .gap(StackGap::Small)
+                    .child(Text::label(&app.name).layout().flex_grow(1.0))
+                    .child(
+                        self.ui
+                            .button(format!("setup:{}", app.bundle_id), status)
+                            .enabled(available)
+                            .on_click(move || open_app(&id, &selected, &release, &request)),
+                    ),
+            );
+        }
+        Some(body)
+    }
     fn store_view(&self) -> ui::StoreLayout {
         let _ = self.catalog_revision.get();
         let storefront = match &self.catalog {
             CatalogStatus::Ready(storefront) => Some(storefront),
             CatalogStatus::Loading | CatalogStatus::Failed(_) => None,
         };
-        let page = Rc::new(detail(
+        let detail = detail(
             &self.catalog,
             self.search.clone(),
             self.selection.clone(),
@@ -1692,7 +1765,17 @@ impl AppStoreApp {
             self.installed_packages.clone(),
             self.package_query_error.clone(),
             &self.ui,
-        ));
+        );
+        let mut page = VStack::new()
+            .alignment(StackAlignment::Stretch)
+            .gap(StackGap::None);
+        if let Some(setup) = self.setup_banner() {
+            page = page.child(
+                Surface::sidebar()
+                    .content(Padding::all(Theme::current().spacing.large).content(setup)),
+            );
+        }
+        let page = Rc::new(page.child(detail.layout().flex_grow(1.0)));
         let sidebar = Scroll::new(self.ui.sidebar_scroll.clone())
             .axis(ScrollAxis::Vertical)
             .content(navigation(

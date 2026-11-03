@@ -15,7 +15,7 @@ abi = "mochios-1"
 entry = "entry.elf"
 description = "Discover and install software for mochiOS"
 icon = "appicon.png"
-resources = ["appicon.png"]
+resources = ["appicon.png", "initial-apps.json"]
 
 [[binary]]
 path = "/system/applications/AppStore.app/entry.elf"
