@@ -33,7 +33,7 @@ no AdHoc or unfiltered download fallback.
 
 The native interface separates Discover, catalog categories, global search,
 and the Installed/Updates library. Discover preserves section titles and
-subtitles supplied by the server. Adaptive app rows show the application,
+subtitles supplied by the server. Standard list rows show the application,
 purpose and developer; opening a row shows its description and release
 information, with the actual Get/Update/Remove actions in the detail view.
 Search input, button interaction and browse/detail scroll positions survive
@@ -44,7 +44,13 @@ The application uses AppCore's standard startup entry point. Page navigation
 uses Toolbar and ActionToolbar; the scrollable detail content uses Surface::pane
 for standard background, continuous corners, clipping and pointer dispatch.
 Catalog entries use native ListRow interactions, typography and spacing rather
-than a separately styled button surface. The page title stays in the toolbar;
+than a separately styled button surface. Real artwork is supplied through
+ListRow::leading_view, so the row owns its dimensions and text layout. The
+application uses the standard compact-window and default split-view sizes,
+ContentArea::pane insets, and theme-based compact navigation; it has no fixed catalog cells,
+application icon radius, or sidebar widths. Empty, loading and unavailable
+states are centered with standard stacks, text and VK Symbols.
+The page title stays in the toolbar;
 sections and app descriptions retain their own reading hierarchy.
 
 Below the combined sidebar/detail minimum width, the sidebar is replaced with

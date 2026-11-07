@@ -22,9 +22,6 @@ use viewkit::prelude::*;
 use viewkit::view::{Constraints, MeasureContext, PaintContext};
 
 const LIBRARY: [&str; 2] = ["Updates", "Installed"];
-const APP_ICON_RADIUS: f32 = 14.0;
-const APP_TILE_WIDTH: f32 = 300.0;
-const APP_ICON_SIZE: f32 = 64.0;
 const MAX_ICON_DIMENSION: u32 = 2_048;
 const SELECTION_ALL: &str = "all";
 const SELECTION_UPDATES: &str = "library:updates";
@@ -373,8 +370,7 @@ fn navigation(
                 query: search,
                 selected_app,
                 scroll: ui.browse_scroll.clone(),
-            }
-            .height(Theme::current().controls.height),
+            },
         )
         .child(browse)
         .child(library)
@@ -403,51 +399,23 @@ fn app_tile(
         .unwrap_or(&app.category);
     let bundle_id = app.bundle_id.clone();
     let scroll = ui.detail_scroll.clone();
-    ListRow::with_interaction(
+    let description = if subtitle.trim().is_empty() {
+        app.developer.clone()
+    } else {
+        format!("{subtitle} · {}", app.developer)
+    };
+    let mut row = ListRow::with_interaction(
         ui.interaction(format!("app:{}", app.bundle_id)),
-        format!("View {} by {}", app.name, app.developer),
+        app.name.clone(),
     )
-    .content(
-        Padding::symmetric(
-            Theme::current().spacing.small,
-            Theme::current().spacing.small,
-        )
-        .content(
-            HStack::new()
-                .alignment(StackAlignment::Center)
-                .gap(StackGap::Medium)
-                .child(app_icon(app, icons, APP_ICON_SIZE))
-                .child(
-                    VStack::new()
-                        .alignment(StackAlignment::Stretch)
-                        .gap(StackGap::ExtraSmall)
-                        .child(Text::label(app.name.clone()).single_line(true))
-                        .child(
-                            Text::caption(subtitle)
-                                .single_line(true)
-                                .tone(TextTone::Secondary),
-                        )
-                        .child(
-                            Text::caption(format!(
-                                "{}{}",
-                                app.developer,
-                                if installed { " · Installed" } else { "" }
-                            ))
-                            .single_line(true)
-                            .tone(TextTone::Secondary),
-                        )
-                        .layout()
-                        .flex_grow(1.0)
-                        .flex_shrink(1.0),
-                )
-                .child(
-                    Icon::new(SymbolName::ChevronRight)
-                        .size(Theme::current().layout.compact_icon_size)
-                        .color(Theme::current().colors.text_tertiary),
-                ),
-        ),
-    )
-    .on_select(move || {
+    .leading_view(app_icon(app, icons))
+    .subtitle(description)
+    .single_line(true)
+    .trailing_symbol(SymbolName::ChevronRight);
+    if installed {
+        row = row.trailing("Installed");
+    }
+    row.on_select(move || {
         scroll.reset();
         open_app(&bundle_id, &selected_app, &release_status, &pending_release);
     })
@@ -520,28 +488,17 @@ fn section_view(
         .alignment(StackAlignment::Stretch)
         .gap(StackGap::Small)
         .child(heading)
-        .child(
-            AdaptiveGrid::new(
-                APP_TILE_WIDTH,
-                APP_ICON_SIZE + Theme::current().spacing.small * 2.0,
+        .child(List::new().rows(apps.into_iter().map(|app| {
+            app_tile(
+                app,
+                icons,
+                selected_app.clone(),
+                release_status.clone(),
+                pending_release.clone(),
+                installed_packages,
+                ui,
             )
-            .fill_columns()
-            .spacing(
-                Theme::current().spacing.large,
-                Theme::current().spacing.small,
-            )
-            .children(apps.into_iter().map(|app| {
-                app_tile(
-                    app,
-                    icons,
-                    selected_app.clone(),
-                    release_status.clone(),
-                    pending_release.clone(),
-                    installed_packages,
-                    ui,
-                )
-            })),
-        )
+        })))
 }
 
 fn catalog_content(
@@ -562,6 +519,25 @@ fn catalog_content(
         selection.strip_prefix("category:")
     };
     let groups = grouped_apps(storefront, query, category);
+    if groups.is_empty() {
+        return ui::status_content(
+            if searching {
+                SymbolName::Search
+            } else {
+                SymbolName::Grid
+            },
+            if searching {
+                "No matching applications"
+            } else {
+                "No applications available"
+            },
+            if searching {
+                "Try an application name, developer, or a different search."
+            } else {
+                "Applications will appear here when they are available in the catalog."
+            },
+        );
+    }
     let count: usize = groups.iter().map(|(_, apps)| apps.len()).sum();
     let noun = if count == 1 {
         "application"
@@ -617,31 +593,6 @@ fn catalog_content(
             ));
         }
     }
-    if groups.is_empty() {
-        content = content.child(
-            Padding::symmetric(0.0, Theme::current().spacing.extra_large).content(
-                VStack::new()
-                    .alignment(StackAlignment::Stretch)
-                    .gap(StackGap::Small)
-                    .child(
-                        Text::label(if searching {
-                            "No matching applications"
-                        } else {
-                            "No applications available"
-                        })
-                        .weight(600),
-                    )
-                    .child(
-                        Text::caption(if searching {
-                            "Try an application name, developer, or a different search."
-                        } else {
-                            "Applications will appear here when they are available in the catalog."
-                        })
-                        .tone(TextTone::Secondary),
-                    ),
-            ),
-        );
-    }
     content
 }
 
@@ -653,25 +604,25 @@ fn catalog_app<'a>(storefront: &'a Storefront, bundle_id: &str) -> Option<&'a Ca
         .find(|app| app.bundle_id == bundle_id)
 }
 
-fn app_icon(app: &CatalogApp, icons: &[LoadedIcon], size: f32) -> StackChild {
+fn app_icon(app: &CatalogApp, icons: &[LoadedIcon]) -> Rc<dyn View> {
     if let Some(icon) = icons
         .iter()
         .find(|icon| icon.bundle_id == app.bundle_id)
         .map(|icon| icon.image.clone())
     {
-        Image::new(icon)
-            .content_mode(ImageContentMode::Fill)
-            .radius(CornerRadius::Custom(APP_ICON_RADIUS))
-            .accessibility_label(format!("{} icon", app.name))
-            .frame(size, size)
+        Rc::new(
+            Image::new(icon)
+                .content_mode(ImageContentMode::Fit)
+                .accessibility_label(format!("{} icon", app.name)),
+        )
     } else if let Some(icon) = default_app_icon() {
-        Svg::new(icon)
-            .content_mode(SvgContentMode::Fill)
-            .radius(CornerRadius::Custom(APP_ICON_RADIUS))
-            .accessibility_label(format!("{} icon", app.name))
-            .frame(size, size)
+        Rc::new(
+            Svg::new(icon)
+                .content_mode(SvgContentMode::Fit)
+                .accessibility_label(format!("{} icon", app.name)),
+        )
     } else {
-        Spacer::new().into_stack_child().frame(size, size)
+        Rc::new(ZStack::new())
     }
 }
 
@@ -1069,7 +1020,6 @@ fn app_detail(
     let mut get_button = ui
         .button(format!("install:{}", app.bundle_id), button_label)
         .style(ButtonStyle::Accent)
-        .size(ButtonSize::Medium)
         .enabled(button_enabled);
     if let Some(release) = release {
         let install_app = app.clone();
@@ -1132,7 +1082,6 @@ fn app_detail(
         actions = actions.child(
             ui.button(format!("remove:{}", app.bundle_id), "Remove")
                 .style(ButtonStyle::Standard)
-                .size(ButtonSize::Medium)
                 .enabled(pending_install.get().is_none())
                 .on_click(move || {
                     remove_status.set(InstallStatus::Removing {
@@ -1153,15 +1102,13 @@ fn app_detail(
         );
     }
     let mut information = SettingsSection::new("Information")
-        .grouped()
-        .row(settings_value("Version", "", version).compact())
-        .row(settings_value("Developer", "", app.developer.clone()).compact());
+        .row(settings_value("Version", "", version))
+        .row(settings_value("Developer", "", app.developer.clone()));
     if !app.category.trim().is_empty() {
-        information =
-            information.row(settings_value("Category", "", app.category.clone()).compact());
+        information = information.row(settings_value("Category", "", app.category.clone()));
     }
     if let Some(size) = size {
-        information = information.row(settings_value("Download Size", "", size).compact());
+        information = information.row(settings_value("Download Size", "", size));
     }
     let mut content = VStack::new()
         .alignment(StackAlignment::Stretch)
@@ -1170,20 +1117,21 @@ fn app_detail(
             HStack::new()
                 .alignment(StackAlignment::Center)
                 .gap(StackGap::Large)
-                .child(app_icon(app, icons, APP_ICON_SIZE))
+                .child(app_icon(app, icons).frame(
+                    Theme::current().layout.avatar_size,
+                    Theme::current().layout.avatar_size,
+                ))
                 .child(
                     VStack::new()
                         .alignment(StackAlignment::Stretch)
                         .gap(StackGap::Small)
-                        .child(Text::styled(app.name.clone(), TextRole::TitleMedium))
                         .child(
-                            Text::caption(
+                            PageHeader::new(app.name.clone()).subtitle(
                                 app.subtitle
                                     .as_deref()
                                     .filter(|s| !s.trim().is_empty())
                                     .unwrap_or(&app.developer),
-                            )
-                            .tone(TextTone::Secondary),
+                            ),
                         )
                         .child(actions)
                         .layout()
@@ -1194,10 +1142,10 @@ fn app_detail(
     if let Some(message) = status_message {
         let failed = matches!(install_status.get(), InstallStatus::Failed { ref bundle_id, .. } if bundle_id == &app.bundle_id)
             || matches!(release_status.get(), ReleaseStatus::Failed { ref bundle_id, .. } if bundle_id == &app.bundle_id);
-        content = content.child(Text::caption(message).color(if failed {
-            Theme::current().colors.destructive
+        content = content.child(Text::caption(message).tone(if failed {
+            TextTone::Destructive
         } else {
-            Theme::current().colors.text_secondary
+            TextTone::Secondary
         }));
     }
     if let Some(pending) = pending_install
@@ -1216,7 +1164,6 @@ fn app_detail(
             .child(Text::metadata(format!("Downloaded {percent:.0}%")));
     }
     content
-        .child(Divider::new())
         .child(
             VStack::new()
                 .alignment(StackAlignment::Stretch)
@@ -1273,86 +1220,77 @@ fn library_content(
         .alignment(StackAlignment::Stretch)
         .gap(StackGap::ExtraLarge);
     if let Some(error) = package_query_error {
-        return content
-            .child(
-                Text::body("Installed applications could not be loaded.").tone(TextTone::Secondary),
-            )
-            .child(Text::metadata(error));
+        return ui::status_content(
+            SymbolName::Warning,
+            "Installed applications could not be loaded.",
+            error,
+        );
     }
     if apps.is_empty() && other_packages.is_empty() {
-        content = content.child(
-            Text::body(if updates_only {
+        return ui::status_content(
+            if updates_only {
+                SymbolName::Checkmark
+            } else {
+                SymbolName::Internaldrive
+            },
+            if updates_only {
                 "All applications are up to date."
             } else {
                 "No applications are installed."
-            })
-            .tone(TextTone::Secondary),
-        );
-    } else if !apps.is_empty() {
-        content = content.child(
-            AdaptiveGrid::new(
-                APP_TILE_WIDTH,
-                APP_ICON_SIZE + Theme::current().spacing.small * 2.0,
-            )
-            .fill_columns()
-            .spacing(
-                Theme::current().spacing.large,
-                Theme::current().spacing.small,
-            )
-            .children(apps.into_iter().map(|app| {
-                app_tile(
-                    app,
-                    icons,
-                    selected_app.clone(),
-                    release_status.clone(),
-                    pending_release.clone(),
-                    installed_packages,
-                    ui,
-                )
-            })),
+            },
+            if updates_only {
+                "Updates for your installed applications will appear here."
+            } else {
+                "Applications you install will appear here."
+            },
         );
     }
+    if !apps.is_empty() {
+        content = content.child(List::new().rows(apps.into_iter().map(|app| {
+            app_tile(
+                app,
+                icons,
+                selected_app.clone(),
+                release_status.clone(),
+                pending_release.clone(),
+                installed_packages,
+                ui,
+            )
+        })));
+    }
     if !other_packages.is_empty() {
-        content = content.child(
-            SettingsSection::new("Other Installed Applications")
-                .grouped()
-                .rows(other_packages.into_iter().map(|package| {
-                    settings_value(
-                        package.name.clone(),
-                        if package.built_in {
-                            "Included with mochiOS"
-                        } else {
-                            "Not listed in this catalog"
-                        },
-                        package.version.clone(),
-                    )
-                    .compact()
-                })),
-        );
+        content = content.child(SettingsSection::new("Other Installed Applications").rows(
+            other_packages.into_iter().map(|package| {
+                settings_value(
+                    package.name.clone(),
+                    if package.built_in {
+                        "Included with mochiOS"
+                    } else {
+                        "Not listed in this catalog"
+                    },
+                    package.version.clone(),
+                )
+            }),
+        ));
     }
     content
 }
 
 fn loading_content() -> VStack {
-    VStack::new()
-        .alignment(StackAlignment::Stretch)
-        .gap(StackGap::Small)
-        .child(Text::styled("App Store", TextRole::TitleMedium).weight(600))
-        .child(Text::body("Loading applications…").tone(TextTone::Secondary))
+    ui::status_content(
+        SymbolName::Grid,
+        "Loading applications…",
+        "Connecting to App Store.",
+    )
 }
 
 fn error_content(error: &str) -> VStack {
-    VStack::new()
-        .alignment(StackAlignment::Stretch)
-        .gap(StackGap::Small)
-        .child(Text::styled("App Store is unavailable", TextRole::TitleMedium).weight(600))
-        .child(
-            Text::body(
-                "The catalog could not be loaded. Check the network connection and reopen App Store.",
-            )
-            .tone(TextTone::Secondary),
-        )
-        .child(Text::metadata(error))
+    ui::status_content(
+        SymbolName::Warning,
+        "App Store is unavailable",
+        "The catalog could not be loaded. Check the network connection and reopen App Store.",
+    )
+    .child(Text::metadata(error).alignment(TextAlignment::Center))
 }
 
 fn detail(
@@ -1429,7 +1367,7 @@ fn detail(
         CatalogStatus::Failed(error) => error_content(error),
     };
 
-    let surface = Padding::all(Theme::current().spacing.extra_large).content(content);
+    let surface = ContentArea::pane(content);
     let mut toolbar = ActionToolbar::new(ui.toolbar.clone()).title(if is_detail {
         "App Details"
     } else {
@@ -1574,9 +1512,7 @@ impl App for AppStoreApp {
     }
 
     fn window(&self) -> WindowOptions {
-        WindowOptions::new("App Store")
-            .size(1040.0, 700.0)
-            .resizable(true)
+        WindowOptions::new("App Store").compact()
     }
 
     fn body(&self, _context: &ViewContext) -> Self::Body {
@@ -1704,8 +1640,6 @@ impl AppStoreApp {
                 &self.ui,
             ));
         let wide = NavigationSplitView::new(sidebar, page.clone())
-            .flexible_sidebar(ui::SIDEBAR_MINIMUM, 240.0, 280.0)
-            .minimum_detail_width(ui::DETAIL_MINIMUM)
             .detail_owns_surface(true)
             .shows_divider(false);
         let compact = VStack::new()

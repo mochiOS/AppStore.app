@@ -1,12 +1,25 @@
 //! App Store-specific composition of standard ViewKit controls.
 use super::*;
 
-pub(super) const SIDEBAR_MINIMUM: f32 = 200.0;
-pub(super) const DETAIL_MINIMUM: f32 = 420.0;
-
 #[derive(Clone, PartialEq, Eq)]
 pub(super) enum ToolbarAction {
     Back,
+}
+
+pub(super) fn status_content(
+    symbol: SymbolName,
+    title: impl Into<String>,
+    description: impl Into<String>,
+) -> VStack {
+    VStack::new()
+        .distribution(StackDistribution::Center)
+        .child(Icon::new(symbol))
+        .child(Text::styled(title, TextRole::TitleSmall).alignment(TextAlignment::Center))
+        .child(
+            Text::body(description)
+                .tone(TextTone::Secondary)
+                .alignment(TextAlignment::Center),
+        )
 }
 
 pub(super) struct CachedPicker {
@@ -116,8 +129,7 @@ pub(super) fn compact_navigation(
         .child(StoreSearch {
             field: TextField::with_interaction(ui.search.clone())
                 .placeholder("Search Apps")
-                .leading_symbol(SymbolName::Search)
-                .size(TextFieldSize::Small),
+                .leading_symbol(SymbolName::Search),
             query: search,
             selected_app,
             scroll: ui.browse_scroll.clone(),
@@ -130,10 +142,8 @@ pub(super) struct StoreLayout {
     pub(super) compact: VStack,
 }
 impl StoreLayout {
-    fn content(&self, width: f32) -> &dyn View {
-        // Preserve both useful panes at wide widths; do not crush navigation
-        // labels into a sliver when the detail needs its normal reading width.
-        if width >= SIDEBAR_MINIMUM + DETAIL_MINIMUM {
+    fn content(&self, width: f32, theme: &Theme) -> &dyn View {
+        if width >= theme.layout.compact_window_width {
             &self.wide
         } else {
             &self.compact
@@ -142,10 +152,12 @@ impl StoreLayout {
 }
 impl View for StoreLayout {
     fn measure(&self, c: Constraints, context: &mut MeasureContext<'_>) -> Size {
-        self.content(c.maximum.width).measure(c, context)
+        self.content(c.maximum.width, context.theme)
+            .measure(c, context)
     }
     fn paint(&self, bounds: Rect, context: &mut PaintContext<'_>) {
-        self.content(bounds.size.width).paint(bounds, context);
+        self.content(bounds.size.width, context.theme)
+            .paint(bounds, context);
     }
     fn handle_event(
         &self,
@@ -153,7 +165,7 @@ impl View for StoreLayout {
         event: &ViewEvent,
         context: &mut EventContext<'_>,
     ) -> EventResult {
-        self.content(bounds.size.width)
+        self.content(bounds.size.width, context.theme())
             .handle_event(bounds, event, context)
     }
 }
@@ -263,16 +275,16 @@ mod tests {
                 );
                 assert_eq!(
                     nodes.iter().any(|n| n.role == AccessibilityRole::ComboBox),
-                    width < 620.0
+                    width < theme.layout.compact_window_width
                 );
                 let row = nodes
                     .iter()
                     .find(|n| {
                         n.role == AccessibilityRole::ListItem
-                            && n.label.as_deref() == Some("View Notes by Example")
+                            && n.label.as_deref() == Some("Notes")
                     })
                     .unwrap();
-                assert!(row.bounds.size.width > APP_ICON_SIZE);
+                assert!(row.bounds.size.width > theme.layout.list_leading_size);
                 assert!(
                     row.bounds.origin.x >= 0.0
                         && row.bounds.origin.x + row.bounds.size.width <= width + 0.01
