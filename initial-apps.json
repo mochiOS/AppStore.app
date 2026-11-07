@@ -1,6 +1,0 @@
-{
-  "format": 1,
-  "applications": [
-    { "bundle_id": "org.mochios.terra", "name": "Terra" }
-  ]
-}

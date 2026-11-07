@@ -16,6 +16,10 @@ AppStore server -> catalog client -> catalog model -> ViewKit UI
 - Server: <https://github.com/mochiOS/AppStore>
 - Native client: <https://github.com/mochiOS/AppStore.app>
 
+App Store opens to Discover. Initial application installation belongs to OS
+installation; the store has no post-install setup banner or automatic
+navigation to recommended applications.
+
 Selecting a catalog row opens its detail view. The client then requests the
 latest `x86_64` / `mochios-1` release, downloads the MPKG through the public
 download endpoint in bounded ranges, verifies the advertised size and SHA-256,
