@@ -692,7 +692,12 @@ fn finish_install(
     install_status.set(InstallStatus::Installing {
         bundle_id: pending.release.bundle_id.clone(),
     });
-    let result = mutate_package(&pending.path, pending.mutation);
+    let result = mutate_package(
+        &pending.path,
+        pending.mutation,
+        &pending.release,
+        digest.into(),
+    );
     let _ = fs::remove_file(&pending.path);
     match result {
         Ok(()) => match refresh_installed_packages(installed_packages) {
@@ -787,101 +792,36 @@ fn request_package_chunk(
 }
 
 #[cfg(target_os = "mochios")]
-fn package_service_call(request: package_protocol::Request<'_>) -> Result<(), String> {
-    let service =
-        mochi_user_platform::process::find_by_name("package.service").map_err(|error| {
-            format!(
-                "Package service unavailable (errno {}).",
-                error.errno().unwrap_or(0)
-            )
-        })?;
-    if service == 0 {
-        return Err(String::from("Package service is unavailable."));
-    }
-    let request_id = next_request_id(PACKAGE_REQUEST_PREFIX);
-    let mut encoded = [0u8; package_protocol::HEADER_LEN + package_protocol::MAX_PATH_LEN];
-    let request_length = package_protocol::encode_request(request_id, request, &mut encoded)
-        .map_err(|_| String::from("The package request is invalid."))?;
-    let mut reply = [0u8; package_protocol::HEADER_LEN];
-    let message = mochi_user_platform::ipc::call(service, &encoded[..request_length], &mut reply)
-        .map_err(|error| {
-        format!(
-            "Package operation failed (errno {}).",
-            error.errno().unwrap_or(0)
-        )
-    })?;
-    let reply_length = (message & 0xffff_ffff) as usize;
-    let response = reply
-        .get(..reply_length)
-        .ok_or_else(|| String::from("Package service returned an invalid response."))?;
-    let status = package_protocol::decode_status(response, request_id)
-        .map_err(|_| String::from("Package service returned an invalid response."))?;
-    if status == 0 {
-        Ok(())
-    } else {
-        Err(format!(
-            "Package operation failed (errno {}).",
-            status.unsigned_abs()
-        ))
-    }
+fn package_service_call(
+    request: package_protocol::Request<'_>,
+    expected: Option<(&CatalogRelease, [u8; 32])>,
+) -> Result<(), String> {
+    let expected = expected.map(
+        |(release, source_digest)| mochios_package_client::Expected {
+            package_id: &release.bundle_id,
+            version: &release.version,
+            source_digest,
+        },
+    );
+    mochios_package_client::mutate(request, expected)
+        .map_err(|error| format!("Package operation failed: {error}"))
 }
 
 #[cfg(target_os = "mochios")]
 fn query_installed_packages() -> Result<Vec<InstalledPackage>, String> {
-    let service =
-        mochi_user_platform::process::find_by_name("package.service").map_err(|error| {
-            format!(
-                "Package service unavailable (errno {}).",
-                error.errno().unwrap_or(0)
-            )
-        })?;
-    if service == 0 {
-        return Err(String::from("Package service is unavailable."));
-    }
-    let request_id = next_request_id(PACKAGE_REQUEST_PREFIX);
-    let mut request = [0u8; package_protocol::HEADER_LEN];
-    let request_length =
-        package_protocol::encode_request(request_id, package_protocol::Request::List, &mut request)
-            .map_err(|_| String::from("Unable to encode the package query."))?;
-    let mut reply = vec![0u8; package_protocol::MAX_MESSAGE_LEN];
-    let message = mochi_user_platform::ipc::call(service, &request[..request_length], &mut reply)
-        .map_err(|error| {
-        format!(
-            "Unable to read installed packages (errno {}).",
-            error.errno().unwrap_or(0)
-        )
-    })?;
-    let reply_length = (message & 0xffff_ffff) as usize;
-    let response = reply
-        .get(..reply_length)
-        .ok_or_else(|| String::from("Package service returned an invalid package list."))?;
-    let records = match package_protocol::decode_list(response, request_id) {
-        Ok(records) => records,
-        Err(_) => {
-            if let Ok(status) = package_protocol::decode_status(response, request_id) {
-                return Err(format!(
-                    "Unable to read installed packages (errno {}).",
-                    status.unsigned_abs()
-                ));
-            }
-            return Err(String::from(
-                "Package service returned an invalid package list.",
-            ));
-        }
-    };
-    let mut packages = Vec::new();
-    for record in records {
-        let record = record
-            .map_err(|_| String::from("Package service returned an invalid package record."))?;
-        packages.push(InstalledPackage {
-            package_id: record.package_id.to_string(),
-            name: record.name.to_string(),
-            version: record.version.to_string(),
-            kind: record.kind.to_string(),
+    let records = mochios_package_client::installed()
+        .map_err(|error| format!("Unable to read installed packages: {error}"))?;
+    let mut packages = records
+        .into_iter()
+        .map(|record| InstalledPackage {
+            package_id: record.package_id,
+            name: record.name,
+            version: record.version,
+            kind: record.kind,
             built_in: record.flags & package_protocol::PACKAGE_FLAG_BUILT_IN != 0,
             removable: record.flags & package_protocol::PACKAGE_FLAG_REMOVABLE != 0,
-        });
-    }
+        })
+        .collect::<Vec<_>>();
     packages.sort_by(|left, right| {
         left.name
             .cmp(&right.name)
@@ -896,7 +836,10 @@ fn query_installed_packages() -> Result<Vec<InstalledPackage>, String> {
 }
 
 #[cfg(not(target_os = "mochios"))]
-fn package_service_call(_request: package_protocol::Request<'_>) -> Result<(), String> {
+fn package_service_call(
+    _request: package_protocol::Request<'_>,
+    _expected: Option<(&CatalogRelease, [u8; 32])>,
+) -> Result<(), String> {
     Err(String::from(
         "Package management is available only when App Store is running on mochiOS.",
     ))
@@ -908,15 +851,23 @@ fn refresh_installed_packages(packages: &State<Vec<InstalledPackage>>) -> Result
     Ok(())
 }
 
-fn mutate_package(path: &str, mutation: PackageMutation) -> Result<(), String> {
-    package_service_call(match mutation {
-        PackageMutation::Install => package_protocol::Request::Install(path),
-        PackageMutation::Update => package_protocol::Request::Update(path),
-    })
+fn mutate_package(
+    path: &str,
+    mutation: PackageMutation,
+    release: &CatalogRelease,
+    digest: [u8; 32],
+) -> Result<(), String> {
+    package_service_call(
+        match mutation {
+            PackageMutation::Install => package_protocol::Request::Install(path),
+            PackageMutation::Update => package_protocol::Request::Update(path),
+        },
+        Some((release, digest)),
+    )
 }
 
 fn remove_package(package_id: &str) -> Result<(), String> {
-    package_service_call(package_protocol::Request::Remove(package_id))
+    package_service_call(package_protocol::Request::Remove(package_id), None)
 }
 
 fn start_install(

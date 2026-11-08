@@ -68,6 +68,7 @@ dependencies = [
  "mochi-user-platform",
  "mochios-appcore",
  "mochios-net-device-protocol",
+ "mochios-package-client",
  "mochios-package-protocol",
  "serde",
  "serde_json",
@@ -1061,6 +1062,7 @@ dependencies = [
  "mochios-capability-protocol",
  "mochios-package-manifest",
  "mochios-workspace-protocol",
+ "zeroize",
 ]
 
 [[package]]
@@ -1115,6 +1117,16 @@ name = "mochios-net-device-protocol"
 version = "0.1.0"
 
 [[package]]
+name = "mochios-package-client"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "mochi-user-platform",
+ "mochios-package-protocol",
+ "mochios-posix-protocol",
+]
+
+[[package]]
 name = "mochios-package-manifest"
 version = "0.1.0"
 dependencies = [
@@ -1124,6 +1136,9 @@ dependencies = [
 [[package]]
 name = "mochios-package-protocol"
 version = "0.1.0"
+dependencies = [
+ "mnu-abi",
+]
 
 [[package]]
 name = "mochios-posix-client"
@@ -3304,10 +3319,6 @@ version = "0.1.0"
 
 [[patch.unused]]
 name = "mnu"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "mochios-mdriver-protocol"
 version = "0.1.0"
 
 [[patch.unused]]

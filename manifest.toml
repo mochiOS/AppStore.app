@@ -24,6 +24,7 @@ requires = [
     "clipboard.read",
     "clipboard.write",
     "fs.write.tmp",
+    "fs.read.tmp",
     "ipc.client",
     "ipc.server",
     "net.http.request",

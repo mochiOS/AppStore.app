@@ -16,6 +16,7 @@ sha2 = "0.10"
 viewkit = { path = "../../libraries/viewkit" }
 
 [target.'cfg(target_os = "mochios")'.dependencies]
+mochios-package-client = { path = "../../user/crates/package-client" }
 mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false, features = ["std"] }
 
 [[bin]]
