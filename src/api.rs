@@ -358,7 +358,7 @@ fn call(request: &[u8], reply: &mut [u8]) -> Result<usize, ApiError> {
     }
 }
 
-fn network_service() -> Result<u64, ApiError> {
+pub(crate) fn network_service() -> Result<u64, ApiError> {
     let service = mochi_user_platform::process::find_by_name("network.service")
         .map_err(|error| ApiError::ServiceUnavailable(error.errno().unwrap_or(0)))?;
     if service == 0 {
@@ -367,5 +367,12 @@ fn network_service() -> Result<u64, ApiError> {
         ))
     } else {
         Ok(service)
+    }
+}
+
+/// Release a late response after the background request deadline expired.
+pub(crate) fn discard_response(message: &[u8]) {
+    if let Ok(response) = decode_http_request_result(message) {
+        let _ = close(response.request_id, response.handle);
     }
 }

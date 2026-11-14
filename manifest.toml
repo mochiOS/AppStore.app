@@ -28,6 +28,7 @@ requires = [
     "ipc.client",
     "ipc.server",
     "net.http.request",
+    "system.random.read",
     "package.install",
     "package.inspect",
     "package.remove",

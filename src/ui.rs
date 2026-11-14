@@ -186,6 +186,7 @@ mod tests {
         ]}]}"#).unwrap();
         AppStoreApp {
             ui: Rc::new(StoreUi::default()),
+            setup: crate::setup_progress::SetupProgress::new(),
             catalog: CatalogStatus::Ready(catalog),
             catalog_revision: State::new(0),
             pending_catalog: None,
@@ -201,6 +202,23 @@ mod tests {
             installed_packages: State::new(Vec::new()),
             package_query_error: State::new(None),
         }
+    }
+
+    #[test]
+    fn local_library_remains_available_when_the_remote_catalog_fails() {
+        let mut app = store();
+        app.catalog = CatalogStatus::Failed("Offline".into());
+        app.selection.set(crate::SELECTION_INSTALLED.into());
+        app.installed_packages.set(vec![crate::InstalledPackage {
+            package_id: "org.example.notes".into(), name: "Notes".into(),
+            version: "1.0".into(), kind: "application".into(), built_in: false, removable: true,
+        }]);
+        let (list, _) = paint(&app, 1000., &Theme::LIGHT);
+        let labels: Vec<_> = list.commands().iter().filter_map(|command| match command {
+            DrawCommand::DrawText { command } => Some(command.text.as_str()), _ => None,
+        }).collect();
+        assert!(labels.contains(&"Notes"));
+        assert!(!labels.contains(&"App Store is unavailable"));
     }
     fn paint(
         app: &AppStoreApp,

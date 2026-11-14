@@ -5,6 +5,8 @@ mod api;
 mod api;
 mod catalog;
 mod ui;
+mod standard_apps;
+mod setup_progress;
 
 use api::{ApiError, DataRequest};
 use catalog::{CatalogApp, CatalogRelease, ReleaseResponse, Storefront};
@@ -1138,6 +1140,7 @@ fn library_content(
     release_status: State<ReleaseStatus>,
     pending_release: State<Option<PendingRelease>>,
     package_query_error: Option<&str>,
+    setup: Rc<setup_progress::SetupProgress>,
     ui: &Rc<StoreUi>,
 ) -> VStack {
     let updates_only = selection == SELECTION_UPDATES;
@@ -1170,15 +1173,16 @@ fn library_content(
     let mut content = VStack::new()
         .alignment(StackAlignment::Stretch)
         .gap(StackGap::ExtraLarge);
+    if !updates_only { content = content.child(setup); }
     if let Some(error) = package_query_error {
-        return ui::status_content(
+        return content.child(ui::status_content(
             SymbolName::Warning,
             "Installed applications could not be loaded.",
             error,
-        );
+        ));
     }
     if apps.is_empty() && other_packages.is_empty() {
-        return ui::status_content(
+        return content.child(ui::status_content(
             if updates_only {
                 SymbolName::Checkmark
             } else {
@@ -1194,7 +1198,7 @@ fn library_content(
             } else {
                 "Applications you install will appear here."
             },
-        );
+        ));
     }
     if !apps.is_empty() {
         content = content.child(List::new().rows(apps.into_iter().map(|app| {
@@ -1256,6 +1260,7 @@ fn detail(
     install_status: State<InstallStatus>,
     installed_packages: State<Vec<InstalledPackage>>,
     package_query_error: State<Option<String>>,
+    setup: Rc<setup_progress::SetupProgress>,
     ui: &Rc<StoreUi>,
 ) -> VStack {
     let is_detail = selected_app.get().is_some();
@@ -1300,6 +1305,7 @@ fn detail(
                 release_status.clone(),
                 pending_release.clone(),
                 package_query_error.get().as_deref(),
+                setup.clone(),
                 ui,
             )
         }
@@ -1314,6 +1320,13 @@ fn detail(
             &installed_packages.get(),
             ui,
         ),
+        CatalogStatus::Loading | CatalogStatus::Failed(_)
+            if selection.get().starts_with("library:") && search.get().trim().is_empty() => {
+                library_content(&Storefront { sections: Vec::new(), categories: Vec::new() },
+                    &selection.get(), &icons.get(), &installed_packages.get(),
+                    selected_app, release_status, pending_release,
+                    package_query_error.get().as_deref(), setup.clone(), ui)
+            }
         CatalogStatus::Loading => loading_content(),
         CatalogStatus::Failed(error) => error_content(error),
     };
@@ -1399,6 +1412,7 @@ fn start_icon_requests(storefront: &Storefront) -> (Vec<LoadedIcon>, Vec<(u64, S
 
 struct AppStoreApp {
     ui: Rc<StoreUi>,
+    setup: Rc<setup_progress::SetupProgress>,
     catalog: CatalogStatus,
     catalog_revision: State<u64>,
     pending_catalog: Option<u64>,
@@ -1445,6 +1459,7 @@ impl App for AppStoreApp {
             };
         Self {
             ui: Rc::new(StoreUi::default()),
+            setup: setup_progress::SetupProgress::new(),
             catalog,
             catalog_revision: State::new(0),
             pending_catalog,
@@ -1578,6 +1593,7 @@ impl AppStoreApp {
             self.install_status.clone(),
             self.installed_packages.clone(),
             self.package_query_error.clone(),
+            self.setup.clone(),
             &self.ui,
         );
         let page = Rc::new(detail);
@@ -1609,6 +1625,13 @@ impl AppStoreApp {
 }
 
 fn main() -> Result<(), ViewKitError> {
+    if std::env::args().any(|argument| argument == "--install-standard-apps") {
+        if let Err(error) = standard_apps::run() {
+            eprintln!("App Store setup: {error}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     appcore::run::<AppStoreApp>()
 }
 
