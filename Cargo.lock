@@ -1084,7 +1084,6 @@ dependencies = [
  "mochios-posix-client",
  "mochios-posix-protocol",
  "mochios-workspace-protocol",
- "serde_json",
  "toml",
  "viewkit",
  "zeroize",
